@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GitHub Actions Extension</title>
+  <style>
+    body {
+      width: 300px;
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      font-size: 14px;
+    }
+    
+    h1 {
+      font-size: 18px;
+      margin: 0 0 16px 0;
+      color: #24292f;
+    }
+    
+    .section {
+      margin-bottom: 16px;
+    }
+    
+    .section-title {
+      font-weight: 600;
+      margin-bottom: 8px;
+      color: #24292f;
+    }
+    
+    input[type="text"], input[type="password"] {
+      width: 100%;
+      padding: 6px 12px;
+      border: 1px solid #d1d9e0;
+      border-radius: 6px;
+      font-size: 14px;
+      box-sizing: border-box;
+    }
+    
+    button {
+      width: 100%;
+      padding: 8px 16px;
+      background-color: #0969da;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    
+    button:hover {
+      background-color: #0860ca;
+    }
+    
+    .status {
+      padding: 8px;
+      border-radius: 6px;
+      margin-top: 8px;
+      font-size: 12px;
+    }
+    
+    .status.success {
+      background-color: #dafbe1;
+      color: #1a7f37;
+    }
+    
+    .status.error {
+      background-color: #ffebe9;
+      color: #cf222e;
+    }
+    
+    .info {
+      font-size: 12px;
+      color: #656d76;
+      margin-top: 8px;
+    }
+    
+    a {
+      color: #0969da;
+      text-decoration: none;
+    }
+    
+    a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <h1>GitHub Actions Extension</h1>
+  
+  <div class="section">
+    <div class="section-title">GitHub Token</div>
+    <input type="password" id="tokenInput" placeholder="Enter GitHub Personal Access Token">
+    <button id="saveTokenBtn">Save Token</button>
+    <div id="tokenStatus" class="status" style="display: none;"></div>
+    <div class="info">
+      <a href="https://github.com/settings/tokens" target="_blank">Create a token here</a>
+      <br>
+      Required scopes: <code>repo</code>, <code>actions:read</code>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">AI Summary Token</div>
+    <input type="password" id="aiTokenInput" placeholder="Enter DashScope (Qianwen) API Key">
+    <button id="saveAiTokenBtn">Save AI Token</button>
+    <div id="aiTokenStatus" class="status" style="display: none;"></div>
+    <div class="info">
+      Provider: <code>dashscope.aliyuncs.com</code>. The key will only be stored locally in this browser.
+    </div>
+  </div>
+  
+  <div class="section">
+    <div class="section-title">Extension Status</div>
+    <div id="extensionStatus">Ready</div>
+  </div>
+  
+  <script src="popup.js"></script>
+</body>
+</html>
+

@@ -1,0 +1,20 @@
+{
+  "name": "github-actions-status-extractor",
+  "version": "1.0.0",
+  "description": "Browser extension for extracting GitHub Actions workflow status",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev-reload.js",
+    "reload": "node scripts/reload-extension.js",
+    "path": "bash scripts/get-path.sh"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.10",
+    "cheerio": "^1.0.0-rc.12",
+    "https-proxy-agent": "^7.0.6",
+    "fflate": "^0.8.1"
+  },
+  "devDependencies": {
+    "chokidar": "^3.6.0"
+  }
+}
