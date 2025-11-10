@@ -4,7 +4,7 @@ import path from 'path';
 import {
   listContextOptions,
   buildIssuePayload
-} from '../modules/issues/context-issue-builder.js';
+} from '../modules/adapters/cli/issues/context-issue-builder.js';
 
 function parseArgs(argv) {
   const args = {
@@ -99,7 +99,7 @@ async function main() {
 
     const contextId = resolveContextId(report, args.contextId);
 
-    const payload = buildIssuePayload({
+    const payload = await buildIssuePayload({
       report,
       contextId
     });

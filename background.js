@@ -1,18 +1,155 @@
-import { extractErrorContexts } from './modules/logs/context-extractor.js';
-import { generateFailureReport as generateFailureReportCore } from './modules/failure-report/core/index.js';
-import { resolveNamespace } from './modules/failure-report/namespace-resolver.js';
-import { enrichReportWithAiSummaries } from './modules/failure-report/ai-summarizer-browser.js';
+import { extractErrorContexts } from './modules/core/logs/context-extractor.js';
+import { createFailureReportFetcher } from './modules/core/failure-report/create-failure-report-fetcher.js';
+import { resolveNamespace } from './modules/core/failure-report/namespace-resolver.js';
+import { enrichReportWithAiSummaries } from './modules/adapters/browser/failure-report/ai-summarizer.js';
 import { buildGrafanaUrl } from './modules/namespace/index.js';
 import { unzipToTextMap } from './modules/utils/zip.js';
+import {
+  FAILURE_REPORT_PROGRESS_CHANNEL,
+  buildProgressMessage,
+  createProgressEventBridge
+} from './modules/core/runtime/progress-channel.js';
+import { createActionsClient as createBrowserActionsClient } from './modules/adapters/browser/github/actions-client.js';
 
 const DEFAULT_REPO = 'matrixorigin/mo-nightly-regression';
 const OWNER = 'matrixorigin';
 const REPO_NAME = DEFAULT_REPO.split('/')[1];
-const API_BASE = `https://api.github.com/repos/${DEFAULT_REPO}`;
+const API_ROOT = 'https://api.github.com';
 const WEB_BASE = `https://github.com/${DEFAULT_REPO}`;
 
 function normalize(value) {
   return (value || '').trim().toLowerCase();
+}
+
+const RAW_JOB_LOG_ENTRY = '__raw_job_log__.txt';
+
+function decodeUtf8(uint8) {
+  if (!uint8) {
+    return '';
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: false }).decode(uint8);
+  } catch (error) {
+    console.warn('[GitHub Actions Extension] Failed to decode job log response as UTF-8', error);
+    return '';
+  }
+}
+
+function slugifyForFilename(value, fallback) {
+  const normalized = normalize(value)
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized || fallback;
+}
+
+function buildStepFilename(index, name) {
+  const slug = slugifyForFilename(name, `step-${index}`);
+  return `${index}_${slug}.txt`;
+}
+
+function parsePlaintextJobLog(uint8) {
+  const text = decodeUtf8(uint8);
+  if (!text) {
+    return { entries: [], rawText: '' };
+  }
+
+  const lines = text.split(/\r?\n/);
+  const entries = [];
+
+  let current = null;
+  let stepIndex = 0;
+
+  const matchStart = (line) => {
+    const startPatterns = [
+      /##\[(?:group|section)\]\s*(?:Starting:\s*)?Run\s+(.+)/i,
+      /^::group::\s*(?:Run\s+)?(.+)/i
+    ];
+    for (const pattern of startPatterns) {
+      const match = line.match(pattern);
+      if (match && match[1]) {
+        return match[1].trim();
+      }
+    }
+    return null;
+  };
+
+  const isEnd = (line) => {
+    return (
+      /##\[(?:endgroup)\]/i.test(line) ||
+      /##\[(?:section)\]\s*Finishing:/i.test(line) ||
+      /^::endgroup::/i.test(line)
+    );
+  };
+
+  const flush = () => {
+    if (!current) {
+      return;
+    }
+    const content = current.lines.join('\n').trim();
+    if (content) {
+      stepIndex += 1;
+      const filename = buildStepFilename(stepIndex, current.name);
+      entries.push({ name: filename, content });
+    }
+    current = null;
+  };
+
+  for (const line of lines) {
+    const startName = matchStart(line);
+    if (startName) {
+      flush();
+      current = { name: startName, lines: [] };
+      continue;
+    }
+    if (current) {
+      current.lines.push(line);
+      if (isEnd(line)) {
+        flush();
+      }
+    }
+  }
+
+  flush();
+
+  return { entries, rawText: text };
+}
+
+function findStepContentInRawLog(rawText, { stepNumber, stepName }) {
+  if (!rawText) {
+    return null;
+  }
+  const { entries } = parsePlaintextJobLog(new TextEncoder().encode(rawText));
+  if (!entries.length) {
+    return null;
+  }
+
+  const normalizedTargetName = normalize(stepName).replace(/[^a-z0-9]+/g, '');
+  const normalizedTargetIndex = Number.isFinite(stepNumber) ? stepNumber : null;
+
+  const scored = entries.map((entry, index) => {
+    const normalizedName = entry.name.toLowerCase();
+    const sanitized = normalizedName.replace(/[^a-z0-9]+/g, '');
+    let score = 0;
+    const entryIndex = index + 1;
+    if (normalizedTargetIndex === entryIndex) {
+      score += 4;
+    }
+    if (normalizedTargetIndex != null && sanitized.includes(`step${normalizedTargetIndex}`)) {
+      score += 2;
+    }
+    if (normalizedTargetName && sanitized.includes(normalizedTargetName)) {
+      score += 3;
+    }
+    return { entry, score, entryIndex };
+  });
+
+  scored.sort((a, b) => b.score - a.score || a.entryIndex - b.entryIndex);
+
+  if (scored[0] && scored[0].score > 0) {
+    return scored[0].entry.content;
+  }
+
+  return null;
 }
 
 const connectionRegistry = new Map(); // tabId -> port
@@ -24,18 +161,20 @@ class BackgroundService {
   constructor() {
     this.githubToken = null;
     this.aiSummaryToken = null;
-    this.jobStepCache = new Map();
+    this.jobCache = new Map();
     this.jobLogArchiveCache = new Map();
     this.runTabMap = new Map();
+    this.actionsClient = null;
   }
 
   async init() {
     const result = await chrome.storage.local.get(['githubToken', 'aiSummaryApiKey']);
     this.githubToken = result.githubToken || null;
     this.aiSummaryToken = result.aiSummaryApiKey || null;
+    this.refreshActionsClient();
 
     chrome.runtime.onConnect.addListener((port) => {
-      if (!port || port.name !== 'failureReportProgress') {
+      if (!port || port.name !== FAILURE_REPORT_PROGRESS_CHANNEL) {
         return;
       }
       const tabId = port.sender?.tab?.id ?? null;
@@ -106,159 +245,64 @@ class BackgroundService {
     }
   }
 
-  buildApiHeaders(extra = {}) {
-    const headers = {
-      Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-      ...extra
-    };
-    if (this.githubToken) {
-      headers.Authorization = `token ${this.githubToken}`;
-    }
-    return headers;
+  refreshActionsClient() {
+    this.actionsClient = createBrowserActionsClient({
+      repo: DEFAULT_REPO,
+      token: this.githubToken || undefined,
+      apiBase: API_ROOT
+    });
   }
 
-  async apiRequest(pathOrUrl, { method = 'GET', headers = {}, body } = {}) {
-    const url = pathOrUrl.startsWith('http') ? pathOrUrl : `${API_BASE}${pathOrUrl}`;
-    const requestInit = {
-      method,
-      headers: this.buildApiHeaders(headers)
-    };
-    if (body != null) {
-      requestInit.body = typeof body === 'string' ? body : JSON.stringify(body);
-      if (!requestInit.headers['Content-Type']) {
-        requestInit.headers['Content-Type'] = 'application/json';
-      }
+  getActionsClient() {
+    if (!this.actionsClient) {
+      this.refreshActionsClient();
     }
-
-    const response = await fetch(url, requestInit);
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`API request failed (${response.status}): ${text || response.statusText}`);
-    }
-    if (response.status === 204) {
-      return null;
-    }
-    return await response.json();
+    return this.actionsClient;
   }
 
   async fetchRun(runId) {
     if (!runId) {
       throw new Error('runId is required');
     }
-    return await this.apiRequest(`/actions/runs/${runId}`);
+    const client = this.getActionsClient();
+    return await client.getRun(runId);
   }
 
   async fetchAllJobs(runId) {
     if (!runId) {
       throw new Error('runId is required');
     }
-    const jobs = [];
-    let page = 1;
-    while (true) {
-      const data = await this.apiRequest(
-        `/actions/runs/${runId}/jobs?per_page=100&page=${page}`
-      );
-      const batch = Array.isArray(data?.jobs) ? data.jobs : [];
-      jobs.push(...batch);
-      if (batch.length < 100) {
-        break;
-      }
-      page += 1;
-    }
-    return jobs;
+    const client = this.getActionsClient();
+    return await client.listJobs(runId);
   }
 
   async fetchJobDetails(jobId) {
     if (!jobId) {
       throw new Error('jobId is required');
     }
-    return await this.apiRequest(`/actions/jobs/${jobId}`);
+    const client = this.getActionsClient();
+    return await client.getJob(jobId);
   }
 
-  async ensureJobWithSteps(job) {
-    if (job?.steps && Array.isArray(job.steps) && job.steps.length > 0) {
-      return job;
+  async ensureJobWithSteps(jobOrId) {
+    const jobId = typeof jobOrId === 'object' ? jobOrId?.id : jobOrId;
+    if (!jobId) {
+      throw new Error('jobId is required.');
     }
-    const details = await this.fetchJobDetails(job.id);
-    return {
-      ...job,
-      ...details,
+    const cached = this.jobCache.get(jobId);
+    if (cached?.steps?.length) {
+      return cached;
+    }
+    const baseJob = typeof jobOrId === 'object' && jobOrId ? jobOrId : null;
+    const details = baseJob?.steps?.length ? baseJob : await this.fetchJobDetails(jobId);
+    const withSteps = {
+      ...(baseJob || {}),
+      ...(details || {}),
+      id: jobId,
       steps: Array.isArray(details?.steps) ? details.steps : []
     };
-  }
-
-  buildPageHeaders(extra = {}) {
-    return {
-      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'en-US,en;q=0.9',
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      ...extra
-    };
-  }
-
-  async loadJobStepMetadata(runId, jobId) {
-    const cacheKey = `${runId}:${jobId}`;
-    if (this.jobStepCache.has(cacheKey)) {
-      return this.jobStepCache.get(cacheKey);
-    }
-
-    console.log('[GitHub Actions Extension] loadJobStepMetadata:start', { runId, jobId });
-    const url = `${WEB_BASE}/actions/runs/${runId}/job/${jobId}?check_suite_focus=true`;
-    const response = await fetch(url, {
-      headers: this.buildPageHeaders(),
-      credentials: 'include'
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to load job page (${response.status})`);
-    }
-    const html = await response.text();
-
-    const metadata = new Map();
-    const stepRegex = /<check-step\b[^>]*>/gi;
-    let match;
-    while ((match = stepRegex.exec(html)) !== null) {
-      const tag = match[0];
-      const getAttr = (name) => {
-        const attrRegex = new RegExp(`${name}="([^"]*)"`, 'i');
-        const attrMatch = attrRegex.exec(tag);
-        return attrMatch ? attrMatch[1] : null;
-      };
-
-      const numberValue = Number(getAttr('data-number'));
-      if (Number.isNaN(numberValue)) {
-        continue;
-      }
-
-      const rawLogUrl = getAttr('data-log-url');
-      let logUrl = null;
-      if (rawLogUrl) {
-        try {
-          logUrl = new URL(rawLogUrl, WEB_BASE).toString();
-        } catch (error) {
-          console.warn(
-            '[GitHub Actions Extension] Unable to resolve step log URL',
-            rawLogUrl,
-            error
-          );
-        }
-      }
-
-      metadata.set(numberValue, {
-        logUrl,
-        name: getAttr('data-name'),
-        conclusion: getAttr('data-conclusion')
-      });
-    }
-
-    this.jobStepCache.set(cacheKey, metadata);
-    console.log('[GitHub Actions Extension] loadJobStepMetadata:complete', {
-      runId,
-      jobId,
-      stepCount: metadata.size
-    });
-    return metadata;
+    this.jobCache.set(jobId, withSteps);
+    return withSteps;
   }
 
   async fetchJobLogArchive(runId, jobId) {
@@ -296,15 +340,39 @@ class BackgroundService {
     const uint8 = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
     const isZip = uint8.length >= 2 && uint8[0] === 0x50 && uint8[1] === 0x4b;
     if (!isZip) {
-      let preview = '';
-      try {
-        preview = new TextDecoder('utf-8', { fatal: false }).decode(uint8.slice(0, 512));
-      } catch (error) {
-        preview = '[binary data]';
-      }
-      throw new Error(
-        `GitHub returned a non-zip response when downloading job logs: ${preview || 'no preview available'}`
+      console.warn(
+        '[GitHub Actions Extension] Job log archive returned as plaintext, applying fallback parser',
+        { jobId }
       );
+      const { entries, rawText } = parsePlaintextJobLog(uint8);
+      const archive = new Map();
+      if (rawText) {
+        archive.set(RAW_JOB_LOG_ENTRY, rawText);
+      }
+      for (const entry of entries) {
+        archive.set(entry.name, entry.content);
+      }
+      if (archive.size === 0) {
+        let preview = '';
+        try {
+          preview = decodeUtf8(uint8.slice(0, 512));
+        } catch (error) {
+          preview = '[binary data]';
+        }
+        throw new Error(
+          `GitHub returned a non-zip response when downloading job logs: ${preview || 'no preview available'}`
+        );
+      }
+      this.jobLogArchiveCache.set(jobId, archive);
+      console.log('[GitHub Actions Extension] fetchJobLogArchive:complete (plaintext)', {
+        jobId,
+        entryCount: archive.size
+      });
+      this.emitRunProgress(runId, {
+        type: 'status',
+        label: `Job logs downloaded (plaintext fallback, ${archive.size} sections)`
+      });
+      return archive;
     }
     const archive = unzipToTextMap(uint8);
     this.jobLogArchiveCache.set(jobId, archive);
@@ -388,16 +456,33 @@ class BackgroundService {
     }
 
     if (candidates.length === 0) {
-      const available = Array.from(archive.keys());
-      console.warn(
-        '[GitHub Actions Extension] Step log not found in archive',
-        {
-          jobId,
-          stepNumber,
-          stepName,
-          availableFiles: available
+      const rawText = archive.get(RAW_JOB_LOG_ENTRY) || null;
+      if (typeof rawText === 'string' && rawText.length > 0) {
+        const fallbackContent = findStepContentInRawLog(rawText, { stepNumber, stepName });
+        if (fallbackContent) {
+          console.warn(
+            '[GitHub Actions Extension] Step log resolved via plaintext fallback parser',
+            {
+              jobId,
+              stepNumber,
+              stepName
+            }
+          );
+          this.emitRunProgress(runId, {
+            type: 'status',
+            label: `Archive matched via plaintext fallback for step ${stepNumber}`
+          });
+          return fallbackContent;
         }
-      );
+      }
+
+      const available = Array.from(archive.keys());
+      console.warn('[GitHub Actions Extension] Step log not found in archive', {
+        jobId,
+        stepNumber,
+        stepName,
+        availableFiles: available
+      });
       this.emitRunProgress(runId, {
         type: 'phaseError',
         error: `Step ${stepNumber} log not found in archive`,
@@ -425,104 +510,32 @@ class BackgroundService {
       throw new Error('runId, jobId, and stepNumber are required to fetch step logs.');
     }
 
-    console.log('[GitHub Actions Extension] fetchStepLog:start', {
-      runId,
-      jobId,
-      stepNumber
-    });
+    const job = await this.ensureJobWithSteps(jobId);
+    const step = job.steps?.find((candidate) => candidate.number === stepNumber) || null;
+    const stepName = step?.name || null;
+
     this.emitRunProgress(runId, {
       type: 'status',
-      label: `Preparing logs for step ${stepNumber}...`
+      label: `Preparing logs for step ${stepNumber}${stepName ? ` (${stepName})` : ''}...`
     });
-    const metadata = await this.loadJobStepMetadata(runId, jobId);
-    const stepMeta = metadata.get(stepNumber);
 
-    const attemptArchiveFallback = async () => {
-      console.log('[GitHub Actions Extension] fetchStepLog:archiveFallback', {
-        runId,
-        jobId,
-        stepNumber,
-        stepName: stepMeta?.name || null
-      });
-      this.emitRunProgress(runId, {
-        type: 'status',
-        label: `Using archive logs for step ${stepNumber}...`
-      });
-      const archiveLog = await this.getStepLogFromArchive({
-        runId,
-        jobId,
-        stepNumber,
-        stepName: stepMeta?.name || null
-      });
-      if (!archiveLog) {
-        throw new Error('Step log not found in job log archive.');
-      }
-      this.emitRunProgress(runId, {
-        type: 'status',
-        label: `Archive log ready for step ${stepNumber}`
-      });
-      return {
-        log: archiveLog,
-        logUrl: stepMeta?.logUrl || null
-      };
-    };
-
-    if (!stepMeta?.logUrl) {
-      return attemptArchiveFallback();
-    }
-
-    console.log('[GitHub Actions Extension] fetchStepLog:httpAttempt', {
+    const archiveLog = await this.getStepLogFromArchive({
       runId,
       jobId,
       stepNumber,
-      url: stepMeta.logUrl
+      stepName
     });
-    try {
-      const response = await fetch(stepMeta.logUrl, {
-        headers: {
-          Accept: 'text/plain, text/*;q=0.9, */*;q=0.8',
-          ...(this.githubToken ? { Authorization: `token ${this.githubToken}` } : {})
-        },
-        credentials: 'same-origin',
-        mode: 'cors'
-      });
-
-      if (!response.ok) {
-        const body = await response.text();
-        throw new Error(
-          `Failed to download step log (${response.status} ${response.statusText}): ${body || 'no response body'}`
-        );
-      }
-
-      const log = await response.text();
-      console.log('[GitHub Actions Extension] fetchStepLog:httpSuccess', {
-        runId,
-        jobId,
-        stepNumber,
-        url: stepMeta.logUrl,
-        size: log.length
-      });
-      return {
-        log,
-        logUrl: stepMeta.logUrl
-      };
-    } catch (error) {
-      console.warn(
-        '[GitHub Actions Extension] Direct step log fetch failed, using archive fallback',
-        {
-          jobId,
-          stepNumber,
-          stepName: stepMeta?.name || null,
-          error: error?.message || String(error)
-        }
-      );
-      this.emitRunProgress(runId, {
-        type: 'status',
-        label: `Direct fetch failed for step ${stepNumber}. Trying archive...`,
-        meta: { error: error?.message || String(error) }
-      });
-      return attemptArchiveFallback();
+    if (!archiveLog) {
+      throw new Error('Step log not found in job log archive.');
     }
+    this.emitRunProgress(runId, {
+      type: 'status',
+      label: `Archive log ready for step ${stepNumber}`
+    });
+    return {
+      log: archiveLog,
+      logUrl: null
+    };
   }
 
   async getStoredFailureReport(runId) {
@@ -535,11 +548,7 @@ class BackgroundService {
   }
 
   emitProgress(tabId, runId, payload) {
-    const message = {
-      action: 'failureReportProgress',
-      runId,
-      payload
-    };
+    const message = buildProgressMessage(runId, payload);
 
     if (tabId != null) {
       console.debug('[GitHub Actions Extension] Emitting progress (tab)', tabId, runId, payload);
@@ -582,73 +591,13 @@ class BackgroundService {
     if (tabId != null) {
       this.runTabMap.set(runId, tabId);
     }
-    const emit = (type, payload = {}) => {
-      this.emitProgress(tabId, runId, {
-        type,
-        ...payload
-      });
+    const emit = (progressPayload) => {
+      this.emitProgress(tabId, runId, progressPayload);
     };
 
-    return {
-      phaseStart: (payload) => {
-        emit('phaseStart', {
-          label: payload?.label || payload?.name || 'Working...',
-          meta: payload || null
-        });
-      },
-      phaseComplete: (payload) => {
-        emit('phaseComplete', {
-          label: payload?.label || payload?.name || null,
-          meta: payload || null
-        });
-      },
-      phaseError: (payload) => {
-        emit('phaseError', {
-          error: payload?.error || 'Unknown error',
-          label: payload?.label || payload?.name || 'Phase failed',
-          meta: payload || null
-        });
-      },
-      jobStart: (payload) => {
-        emit('jobStart', {
-          label: `Processing job: ${payload?.jobName || payload?.jobId || ''}`,
-          meta: payload || null
-        });
-      },
-      jobComplete: (payload) => {
-        emit('jobComplete', {
-          label: `Completed job: ${payload?.jobName || payload?.jobId || ''}`,
-          meta: payload || null
-        });
-      },
-      stepStart: (payload) => {
-        emit('stepStart', {
-          label: `Fetching step: ${payload?.stepName || `#${payload?.stepNumber ?? '?'}`}`,
-          meta: payload || null
-        });
-      },
-      stepComplete: (payload) => {
-        emit('stepComplete', {
-          label: `Analyzed step: ${payload?.stepName || `#${payload?.stepNumber ?? '?'}`}`,
-          meta: payload || null
-        });
-      },
-      stepLogFetchStart: (payload) => {
-        emit('stepLogFetchStart', {
-          label: `Downloading logs for ${payload?.stepName || `step ${payload?.stepNumber ?? '?'}`}`,
-          meta: payload || null
-        });
-      },
-      stepLogFetchComplete: (payload) => {
-        emit('stepLogFetchComplete', {
-          label: `Downloaded logs for ${payload?.stepName || `step ${payload?.stepNumber ?? '?'}`}`,
-          meta: payload || null
-        });
-      },
-      status: (payload) => {
-        emit('status', payload || {});
-      }
-    };
+    return createProgressEventBridge({
+      emit
+    });
   }
 
   emitRunProgress(runId, payload = {}) {
@@ -667,7 +616,7 @@ class BackgroundService {
       throw new Error('GitHub token is not configured. Please save a token in the popup.');
     }
 
-    this.jobStepCache.clear();
+    this.jobCache.clear();
     this.jobLogArchiveCache.clear();
     console.log(
       '[GitHub Actions Extension] Generating failure report',
@@ -675,37 +624,38 @@ class BackgroundService {
       tabId != null ? `(tab ${tabId})` : ''
     );
 
-    const actionsClient = {
-      repo: DEFAULT_REPO,
-      owner: OWNER,
-      repoName: REPO_NAME,
-      getRun: (id) => this.fetchRun(id),
-      listJobs: (id) => this.fetchAllJobs(id),
-      getJob: (id) => this.fetchJobDetails(id)
-    };
-
-    const getStepLog = async (jobId, stepNumber) => {
-      const result = await this.fetchStepLog({
-        runId,
-        jobId,
-        stepNumber
-      });
-      return result;
-    };
-
-    const namespaceResolver =
-      typeof resolveNamespace === 'function'
-        ? (context) =>
-            resolveNamespace({
-              ...context,
-              getStepLog
-            })
-        : null;
-
-    const timeProvider = {
-      now: () => (typeof performance !== 'undefined' ? performance.now() : Date.now()),
-      epochMs: () => Date.now()
-    };
+    const fetchFailureReport = createFailureReportFetcher({
+      defaultRepo: DEFAULT_REPO,
+      actionsClientFactory: () => this.getActionsClient(),
+      stepLogLoaderFactory: ({ runId: currentRunId }) => async (jobId, stepNumber) =>
+        this.fetchStepLog({
+          runId: currentRunId,
+          jobId,
+          stepNumber
+        }),
+      namespaceResolverFactory: ({ getStepLog }) =>
+        typeof resolveNamespace === 'function'
+          ? (resolverContext) =>
+              resolveNamespace({
+                ...resolverContext,
+                getStepLog
+              })
+          : null,
+      grafanaUrlBuilder: (namespace, options) => buildGrafanaUrl(namespace, options),
+      extractErrorContexts: (log, options) => extractErrorContexts(log, options),
+      enrichReportWithAiSummaries: (value) =>
+        enrichReportWithAiSummaries(value, {
+          logger: console,
+          overrides: {
+            apiKey: this.aiSummaryToken ?? undefined,
+            enabled: this.aiSummaryToken ? true : undefined
+          }
+        }),
+      timeProviderFactory: () => ({
+        now: () => (typeof performance !== 'undefined' ? performance.now() : Date.now()),
+        epochMs: () => Date.now()
+      })
+    });
 
     const progressReporter = this.createProgressReporter(runId, tabId);
 
@@ -716,28 +666,12 @@ class BackgroundService {
 
     let report;
     try {
-      report = await generateFailureReportCore({
+      report = await fetchFailureReport({
         repo: DEFAULT_REPO,
         runId,
         includeLogs: false,
         includeTimings: false,
-        dependencies: {
-          actionsClient,
-          getStepLog,
-          namespaceResolver,
-          grafanaUrlBuilder: (namespace, options) => buildGrafanaUrl(namespace, options),
-          extractErrorContexts: (log, options) => extractErrorContexts(log, options),
-          enrichReportWithAiSummaries: (value) =>
-            enrichReportWithAiSummaries(value, {
-              logger: console,
-              overrides: {
-                apiKey: this.aiSummaryToken ?? undefined,
-                enabled: this.aiSummaryToken ? true : undefined
-              }
-            }),
-          time: timeProvider,
-          progressReporter
-        }
+        progressReporter
       });
     } catch (error) {
       console.error('[GitHub Actions Extension] Failure report generation failed:', error);
@@ -831,6 +765,7 @@ class BackgroundService {
       throw new Error('GitHub token is required.');
     }
     this.githubToken = value;
+    this.refreshActionsClient();
     await chrome.storage.local.set({ githubToken: value });
   }
 

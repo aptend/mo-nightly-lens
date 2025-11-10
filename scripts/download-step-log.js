@@ -9,8 +9,8 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-import { createActionsClient } from '../modules/github/actions-client.js';
-import { fetchStepLog } from '../modules/logs/step-log-client.js';
+import { createActionsClient } from '../modules/adapters/cli/github/actions-client.js';
+import { fetchStepLog } from '../modules/adapters/cli/logs/step-log-client.js';
 import { NamespaceExtractor } from '../modules/namespace/index.js';
 
 const __filename = fileURLToPath(import.meta.url);

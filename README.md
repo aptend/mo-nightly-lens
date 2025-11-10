@@ -58,29 +58,29 @@ daily-check/
 - `modules/config/index.js`  
   负责解析 `config/app-config.json`（或环境变量指定的配置），集中管理 GitHub Token、API Base、会话 Cookie 与代理设置。
 
-- `modules/github/actions-client.js`  
-  基于共享的 `http-client` 构建的轻量客户端，统一封装获取 workflow run、job 详情、step 列表与分页处理；内建令牌校验与重试。
-- `modules/github/http-client.js`  
-  负责生成带认证头的 GitHub REST 请求。
-- `modules/github/session-client.js`  
-  使用会话 Cookie 和可选代理下载前端页面中的日志资源。
+- `modules/core/github/actions-client.js`  
+  组合注入式 request 函数，统一封装 workflow run、job 详情、step 列表与分页处理逻辑。
+- `modules/adapters/cli/github/`  
+  包含 `api-client`、`actions-client`、`session-client` 等 Node 端实现，负责发起 HTTPS 请求、代理配置与 Cookie 会话。
 
-- `modules/logs/context-extractor.js`  
+- `modules/core/logs/context-extractor.js`  
   针对标准化格式的日志输出，智能截取关键错误段落并推断时间范围，为 Grafana 链接生成提供时间窗口。
-- `modules/logs/step-log-client.js`  
-  通过浏览器会话下载具体 step 的日志文本。
+- `modules/adapters/cli/logs/step-log-client.js`  
+  使用 GitHub 会话 Cookie 下载具体 step 的日志文本。
 
 - `modules/namespace/index.js`  
   同时提供 `NamespaceExtractor` 与 `fetchNamespaceForLatestRun`，将日志解析、Grafana 链接构建与 API 查询聚合。
 
-- `modules/failure-report/service.js`  
-  将 actions 客户端、日志提取器、namespace 解析器等组件组合在一起，输出结构化失败报告。
-- `modules/failure-report/runner.js`  
-  面向 CLI 的薄包装，负责解析命令行参数、创建输出目录、序列化 JSON 报告、落盘原始日志，并打印终端摘要。
-- `modules/failure-report/step-log-loader.js`  
-  动态加载 step log 客户端并带缓存，避免重复请求相同步骤日志。
-- `modules/failure-report/namespace-resolver.js`  
-  根据关键字锁定 “SETUP MO TEST ENV / Clean TKE Env” 步骤，解析日志并生成 namespace，同时回填 Grafana 默认跳转链接。
+- `modules/core/failure-report/`  
+  将 actions 客户端、日志提取器、namespace 解析器、AI 总结等核心能力汇总为可复用模块（如 `create-failure-report-fetcher`、`generate-report`、`step-log-loader`）。
+- `modules/adapters/cli/failure-report/`  
+  CLI 运行时适配层，包含 `fetch-failure-report`、进度输出与 AI 总结配置。
+- `modules/adapters/browser/failure-report/`  
+  浏览器扩展适配层，封装 AI 总结能力并与后台 Service Worker 共享。
+- `modules/core/issues/context-issue-builder.js`  
+  将错误上下文转化为 Issue 草稿（模板替换、AI 摘要、Grafana/日志链接）。
+- `modules/adapters/cli/issues/` 与 `modules/adapters/browser/issues/`  
+  分别在 Node 与扩展环境加载模板资源，复用核心 Issue 生成逻辑。
 
 - `modules/utils/retry.js`  
   提供 `withRetry`、`isRetryable`、`delay` 等工具，针对常见网络异常（超时、连接重置等）自动进行指数退避重试。
@@ -97,7 +97,7 @@ daily-check/
   通过浏览器 session 拉取原始日志文件，适合本地调试。
 
 - `node scripts/extract-error-context.js --file <logPath>`  
-  针对已有日志文件离线提取错误上下文，验证 `modules/logs/context-extractor.js` 的效果。
+  针对已有日志文件离线提取错误上下文，验证 `modules/core/logs/context-extractor.js` 的效果。
 
 所有脚本均读取 `config/app-config.json` 中的 GitHub Token、API Base、Session Cookies 等配置，并以 `matrixorigin/mo-nightly-regression` 为默认仓库，可通过参数覆盖。
 

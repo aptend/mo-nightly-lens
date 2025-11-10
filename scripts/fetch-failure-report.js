@@ -9,7 +9,7 @@ const __dirname = path.dirname(__filename);
 const reportsRoot = path.join(__dirname, '..', 'reports');
 
 async function main() {
-  const { runFetchFailureReport } = await import('../modules/failure-report/runner.js');
+  const { runFetchFailureReport } = await import('../modules/adapters/cli/failure-report/runner.js');
 
   try {
     await runFetchFailureReport({

@@ -1,5 +1,5 @@
 import { createActionsClient } from '../github/actions-client.js';
-import { createStepLogLoader } from '../failure-report/step-log-loader.js';
+import { createStepLogLoader } from '../core/failure-report/step-log-loader.js';
 import { NamespaceExtractor, buildGrafanaUrl } from './index.js';
 
 const DEFAULT_REPO = 'matrixorigin/mo-nightly-regression';

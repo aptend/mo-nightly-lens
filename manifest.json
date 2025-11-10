@@ -27,8 +27,11 @@
     {
       "resources": [
         "modules/*.js",
-        "modules/issues/*.js",
-        "config/bug-report.md"
+        "modules/*/*.js",
+        "modules/*/*/*.js",
+        "modules/*/*/*/*.js",
+        "config/bug-report.md",
+        "styles/*.css"
       ],
       "matches": [
         "https://github.com/*"

@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { enrichReportWithAiSummaries } from '../modules/failure-report/ai-summarizer.js';
+import { enrichReportWithAiSummaries } from '../modules/adapters/cli/failure-report/ai-summarizer.js';
 
 async function main() {
   const [, , inputPath] = process.argv;

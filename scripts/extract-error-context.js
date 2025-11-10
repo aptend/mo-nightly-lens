@@ -9,7 +9,7 @@ const __dirname = path.dirname(__filename);
 
 const {
   extractErrorContexts
-} = await import(path.join(__dirname, '..', 'modules', 'logs', 'context-extractor.js'));
+} = await import(path.join(__dirname, '..', 'modules', 'core', 'logs', 'context-extractor.js'));
 
 function parseArgs(argv) {
   const args = {};
