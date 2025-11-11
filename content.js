@@ -284,11 +284,31 @@ class GitHubActionsExtension {
   async handleWorkflowListPage() {
     console.log('[GitHub Actions Extension] Processing workflow list page...');
     
-    // Wait for workflow list to load
-    await this.waitForWorkflowList();
+    // Load stored namespaces and reports immediately (async operation)
+    const dataPromise = this.loadStoredData();
     
-    // Load stored namespaces and reports
-    const { namespaces, reports } = await this.loadStoredData();
+    // Check if items already exist
+    const existingItems = document.querySelectorAll('[data-testid="workflow-run-row"], .Box-row[data-testid], .workflow-run-item');
+    const itemsWithLinks = Array.from(document.querySelectorAll('.Box-row, [data-testid="workflow-run-row"]')).filter(
+      item => item.querySelector('a[href*="/actions/runs/"]')
+    );
+    const hasItems = existingItems.length > 0 || itemsWithLinks.length > 0;
+    
+    if (hasItems) {
+      // Items already exist, render immediately without waiting
+      const { namespaces, reports } = await dataPromise;
+      this.updateFailureReportsCache(reports);
+      this.renderNamespacesOnWorkflows(namespaces, reports);
+      console.log('[GitHub Actions Extension] Rendered immediately on existing items');
+    }
+    
+    // Only wait if no items found (for dynamically loaded items)
+    if (!hasItems) {
+      await this.waitForWorkflowList();
+    }
+    
+    // Ensure we have the latest data and render (will skip if already rendered above)
+    const { namespaces, reports } = await dataPromise;
     this.updateFailureReportsCache(reports);
     console.log('[GitHub Actions Extension] Loaded stored namespaces:', namespaces);
     console.log(
@@ -298,7 +318,7 @@ class GitHubActionsExtension {
       `[GitHub Actions Extension] Found ${Object.keys(reports).length} stored failure reports`
     );
     
-    // Render namespace information on each workflow item
+    // Render namespace information on each workflow item (safe to call multiple times)
     this.renderNamespacesOnWorkflows(namespaces, reports);
     
     // Observe DOM changes to handle dynamically loaded workflows
@@ -911,21 +931,33 @@ class GitHubActionsExtension {
   }
 
   async waitForWorkflowList() {
-    // Wait for workflow list to appear
+    // Check if workflow run items already exist
+    const existingItems = document.querySelectorAll('[data-testid="workflow-run-row"], .Box-row[data-testid], .workflow-run-item');
+    if (existingItems.length > 0) {
+      // Items already exist, no need to wait
+      return;
+    }
+
+    // Wait for at least one workflow run item to appear (much faster than waiting for container)
     return new Promise((resolve) => {
       const checkInterval = setInterval(() => {
-        const workflowList = document.querySelector('.workflow-list, [data-testid="workflow-runs"]');
-        if (workflowList) {
+        const workflowItems = document.querySelectorAll('[data-testid="workflow-run-row"], .Box-row[data-testid], .workflow-run-item');
+        // Also check for items with run links as fallback
+        const itemsWithLinks = Array.from(document.querySelectorAll('.Box-row, [data-testid="workflow-run-row"]')).filter(
+          item => item.querySelector('a[href*="/actions/runs/"]')
+        );
+        
+        if (workflowItems.length > 0 || itemsWithLinks.length > 0) {
           clearInterval(checkInterval);
           resolve();
         }
-      }, 100);
+      }, 50); // Check more frequently (50ms instead of 100ms)
       
-      // Timeout after 5 seconds
+      // Timeout after 1 second (reduced from 5 seconds)
       setTimeout(() => {
         clearInterval(checkInterval);
         resolve();
-      }, 5000);
+      }, 1000);
     });
   }
 
@@ -995,6 +1027,27 @@ class GitHubActionsExtension {
     this.stateManager.updateFailureReportsCache(reportData);
   }
 
+  async clearFailureReport(runId) {
+    if (!runId) {
+      return;
+    }
+
+    // Clear from state manager
+    if (this.stateManager) {
+      this.stateManager.setFailureReport(runId, null);
+      this.stateManager.setRunState(runId, {
+        status: 'idle',
+        message: null
+      });
+    }
+
+    // Clear from storage
+    const key = `failureReport_${runId}`;
+    await chrome.storage.local.remove(key);
+
+    console.log(`[GitHub Actions Extension] Cleared failure report for run ${runId}`);
+  }
+
   renderRunActions(item, runId, reportFromStorage = null) {
     if (!item || !runId) {
       return;
@@ -1022,28 +1075,102 @@ class GitHubActionsExtension {
     const isLoading = effectiveState.status === 'loading';
     const isError = effectiveState.status === 'error';
     const timelineIsOpen = this.stateManager ? this.stateManager.isTimelineOpen(runId) : false;
+    
+    // If report exists, treat as ready (even if state hasn't been updated yet)
+    const hasReport = report !== null;
+    const shouldShowDetails = isReady || hasReport;
 
     controls.button.disabled = isLoading;
     controls.button.classList.toggle('dc-action-button--loading', isLoading);
-    controls.button.classList.toggle('dc-action-button--ready', isReady);
+    controls.button.classList.toggle('dc-action-button--ready', shouldShowDetails);
 
     let buttonLabel = 'Analyze';
     if (isLoading) {
       buttonLabel = 'Analyzing...';
-    } else if (isReady) {
+    } else if (shouldShowDetails) {
       buttonLabel = timelineIsOpen ? 'Hide Details' : 'Details';
     }
     controls.button.textContent = buttonLabel;
 
+    // Clear existing content
     controls.statusText.textContent = '';
     controls.statusText.classList.remove('dc-status--error', 'dc-status--success');
+    
+    // Remove existing copy button if any
+    const existingCopyBtn = controls.statusText.querySelector('.dc-copy-namespace-btn');
+    if (existingCopyBtn) {
+      existingCopyBtn.remove();
+    }
 
     if (isLoading) {
       controls.statusText.textContent =
         effectiveState.message || 'Generating failure report...';
-    } else if (isReady) {
-      controls.statusText.textContent =
-        effectiveState.message || 'Failure report available';
+    } else if (shouldShowDetails) {
+      // Display namespace if available in report
+      const namespace = report?.namespace;
+      const baseMessage = effectiveState.message || 'Failure report available';
+      if (namespace) {
+        // Create container for message and namespace with copy button
+        const messageText = document.createTextNode(`${baseMessage} | Namespace: `);
+        controls.statusText.appendChild(messageText);
+        
+        // Create namespace span with copy button
+        const namespaceContainer = document.createElement('span');
+        namespaceContainer.className = 'dc-namespace-container';
+        
+        const namespaceSpan = document.createElement('span');
+        namespaceSpan.textContent = namespace;
+        namespaceSpan.className = 'dc-namespace-text';
+        
+        const copyButton = document.createElement('button');
+        copyButton.type = 'button';
+        copyButton.className = 'dc-copy-namespace-btn';
+        copyButton.setAttribute('aria-label', 'Copy namespace');
+        copyButton.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25v-7.5Z"></path><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25v-7.5Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25h-7.5Z"></path></svg>';
+        
+        copyButton.onclick = async (e) => {
+          e.stopPropagation();
+          try {
+            await navigator.clipboard.writeText(namespace);
+            // Visual feedback
+            const originalHTML = copyButton.innerHTML;
+            copyButton.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"></path></svg>';
+            copyButton.classList.add('dc-copy-success');
+            setTimeout(() => {
+              copyButton.innerHTML = originalHTML;
+              copyButton.classList.remove('dc-copy-success');
+            }, 2000);
+          } catch (err) {
+            console.error('Failed to copy namespace:', err);
+            // Fallback for older browsers
+            const textArea = document.createElement('textarea');
+            textArea.value = namespace;
+            textArea.style.position = 'fixed';
+            textArea.style.opacity = '0';
+            document.body.appendChild(textArea);
+            textArea.select();
+            try {
+              document.execCommand('copy');
+              const originalHTML = copyButton.innerHTML;
+              copyButton.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z"></path></svg>';
+              copyButton.classList.add('dc-copy-success');
+              setTimeout(() => {
+                copyButton.innerHTML = originalHTML;
+                copyButton.classList.remove('dc-copy-success');
+              }, 2000);
+            } catch (fallbackErr) {
+              console.error('Fallback copy failed:', fallbackErr);
+            }
+            document.body.removeChild(textArea);
+          }
+        };
+        
+        namespaceContainer.appendChild(namespaceSpan);
+        namespaceContainer.appendChild(copyButton);
+        controls.statusText.appendChild(namespaceContainer);
+      } else {
+        controls.statusText.textContent = baseMessage;
+      }
       controls.statusText.classList.add('dc-status--success');
     } else if (isError) {
       const message = effectiveState.message || 'Failed to generate failure report';
@@ -1053,9 +1180,23 @@ class GitHubActionsExtension {
       controls.statusText.textContent = effectiveState.message || '';
     }
 
+    // Show/hide clear button based on report availability
+    if (controls.clearButton) {
+      controls.clearButton.style.display = (shouldShowDetails && report) ? 'inline-block' : 'none';
+    }
+
     controls.button.onclick = () => {
       this.handleRunActionClick(runId, item);
     };
+
+    // Handle clear button click
+    if (controls.clearButton) {
+      controls.clearButton.onclick = async (e) => {
+        e.stopPropagation();
+        await this.clearFailureReport(runId);
+        this.renderRunActions(item, runId, null);
+      };
+    }
 
     if (isReady && report) {
       this.renderTimeline(controls.timelineContainer, report);
@@ -1129,10 +1270,23 @@ class GitHubActionsExtension {
     const searchRoot = item.matches('a') && item.parentElement ? item.parentElement : item;
     const existing = searchRoot.querySelector(`.dc-run-controls[data-run-id="${runId}"]`);
     if (existing) {
+      let clearButton = existing.querySelector('.dc-clear-button');
+      // If clear button doesn't exist, create it for backward compatibility
+      if (!clearButton) {
+        const actionBar = existing.querySelector('.dc-action-bar');
+        if (actionBar) {
+          clearButton = document.createElement('button');
+          clearButton.type = 'button';
+          clearButton.className = 'dc-clear-button';
+          clearButton.textContent = 'Clear Report';
+          actionBar.appendChild(clearButton);
+        }
+      }
       return {
         container: existing,
         button: existing.querySelector('.dc-action-button'),
         statusText: existing.querySelector('.dc-status-text'),
+        clearButton: clearButton,
         timelineContainer: existing.querySelector('.dc-timeline')
       };
     }
@@ -1152,8 +1306,14 @@ class GitHubActionsExtension {
     const statusText = document.createElement('span');
     statusText.className = 'dc-status-text';
 
+    const clearButton = document.createElement('button');
+    clearButton.type = 'button';
+    clearButton.className = 'dc-clear-button';
+    clearButton.textContent = 'Clear Report';
+
     actionBar.appendChild(button);
     actionBar.appendChild(statusText);
+    actionBar.appendChild(clearButton);
 
     const timelineContainer = document.createElement('div');
     timelineContainer.className = 'dc-timeline';
@@ -1173,6 +1333,7 @@ class GitHubActionsExtension {
       container,
       button,
       statusText,
+      clearButton,
       timelineContainer
     };
   }
@@ -1686,10 +1847,62 @@ class GitHubActionsExtension {
         font-size: 12px;
         color: var(--color-fg-subtle, #57606a);
       }
+      .dc-namespace-container {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .dc-namespace-text {
+        font-weight: 500;
+      }
+      .dc-copy-namespace-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 16px;
+        height: 16px;
+        padding: 0;
+        margin: 0;
+        border: none;
+        background: transparent;
+        color: var(--color-fg-subtle, #57606a);
+        cursor: pointer;
+        border-radius: 3px;
+        transition: background 0.15s ease, color 0.15s ease;
+        opacity: 0.7;
+      }
+      .dc-copy-namespace-btn:hover {
+        background: var(--color-neutral-muted, rgba(208, 215, 222, 0.5));
+        color: var(--color-fg-default, #24292f);
+        opacity: 1;
+      }
+      .dc-copy-namespace-btn:active {
+        transform: scale(0.95);
+      }
+      .dc-copy-namespace-btn.dc-copy-success {
+        color: var(--color-success-fg, #1a7f37);
+        opacity: 1;
+      }
       .dc-status--success {
         color: var(--color-success-fg, #1a7f37);
       }
       .dc-status--error {
+        color: var(--color-danger-fg, #cf222e);
+      }
+      .dc-clear-button {
+        border: 1px solid var(--color-border-default, rgba(31, 35, 40, 0.15));
+        background: var(--color-canvas-default, #f6f8fa);
+        color: var(--color-fg-default, #24292f);
+        border-radius: 6px;
+        padding: 4px 12px;
+        font-size: 12px;
+        cursor: pointer;
+        transition: background 0.15s ease, border-color 0.15s ease;
+        margin-left: auto;
+      }
+      .dc-clear-button:hover {
+        background: var(--color-neutral-muted, #d0d7de);
+        border-color: var(--color-danger-border, #cf222e);
         color: var(--color-danger-fg, #cf222e);
       }
       .dc-timeline {

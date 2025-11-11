@@ -579,12 +579,55 @@ export async function generateFailureReport({
 
   if (typeof enrichReportWithAiSummaries === 'function') {
     debugLog('ai:enrich:start', { runId });
-    const enriched = await enrichReportWithAiSummaries(result);
-    debugLog('ai:enrich:complete', {
-      runId,
-      status: enriched?.aiSummary?.status || enriched?.aiSummary?.status || 'unknown'
+    
+    // Emit progress: AI summary phase start
+    safeProgress(progressReporter, 'phaseStart', {
+      name: 'aiSummary',
+      label: 'Generating AI summaries...'
     });
-    return enriched || result;
+
+    try {
+      const enriched = await enrichReportWithAiSummaries(result);
+      const aiSummaryStatus = enriched?.aiSummary?.status || 'unknown';
+      
+      debugLog('ai:enrich:complete', {
+        runId,
+        status: aiSummaryStatus
+      });
+
+      // Emit progress: AI summary phase complete or error
+      if (aiSummaryStatus === 'ok') {
+        const contextCount = enriched?.summary?.errorContextCount || result?.summary?.errorContextCount || 0;
+        safeProgress(progressReporter, 'phaseComplete', {
+          name: 'aiSummary',
+          label: `AI summaries generated for ${contextCount} error context${contextCount !== 1 ? 's' : ''}`
+        });
+      } else {
+        const errorMessage = enriched?.aiSummary?.error || 'AI summary generation failed';
+        safeProgress(progressReporter, 'phaseError', {
+          name: 'aiSummary',
+          label: 'AI summary generation failed',
+          error: errorMessage
+        });
+      }
+
+      return enriched || result;
+    } catch (error) {
+      debugLog('ai:enrich:error', {
+        runId,
+        error: error?.message || String(error)
+      });
+
+      // Emit progress: AI summary phase error
+      safeProgress(progressReporter, 'phaseError', {
+        name: 'aiSummary',
+        label: 'AI summary generation failed',
+        error: error?.message || String(error)
+      });
+
+      // Return original result if enrichment fails
+      return result;
+    }
   }
 
   debugLog('generate:complete', {
