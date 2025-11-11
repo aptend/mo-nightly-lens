@@ -29,7 +29,6 @@ export async function fetchFailureReport({
   token,
   includeLogs = false,
   logOutputDir,
-  includeTimings = false,
   progress
 } = {}) {
   if (!runId) {
@@ -65,7 +64,6 @@ export async function fetchFailureReport({
     repo: client.repo,
     runId,
     includeLogs,
-    includeTimings,
     logOutputDir,
     dependencies
   });

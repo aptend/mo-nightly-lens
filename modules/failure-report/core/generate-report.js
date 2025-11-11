@@ -151,7 +151,6 @@ export async function generateFailureReport({
   repo,
   runId,
   includeLogs = false,
-  includeTimings = false,
   logOutputDir,
   dependencies = {}
 } = {}) {
@@ -180,21 +179,10 @@ export async function generateFailureReport({
     throw new Error('extractErrorContexts dependency must be a function.');
   }
 
-  debugLog('generate:start', { repo, runId, includeLogs, includeTimings });
+  debugLog('generate:start', { repo, runId, includeLogs });
 
   const timeProvider = resolveTimeProvider(time);
   const runStartedAt = timeProvider.now();
-
-  const timings = includeTimings
-    ? {
-        startedAtEpochMs: timeProvider.epochMs(),
-        phases: [],
-        jobPhases: [],
-        stepTimings: [],
-        stepLogDownloads: [],
-        contextExtraction: []
-      }
-    : null;
 
   const toRelativeMs = (timestamp) => {
     const value = toNumber(timestamp);
@@ -244,17 +232,6 @@ export async function generateFailureReport({
       throw err;
     } finally {
       const end = timeProvider.now();
-      if (timings && collectionName && timings[collectionName]) {
-        const metaValue = typeof meta === 'function' ? meta(result, error) : meta;
-        timings[collectionName].push({
-          name,
-          startedAtMs: toRelativeMs(start),
-          endedAtMs: toRelativeMs(end),
-          durationMs: toDurationMs(end - start),
-          ...(metaValue || {}),
-          ...(error ? { error: error.message || String(error) } : {})
-        });
-      }
 
       if (progressPayload) {
         const metaValue = typeof meta === 'function' ? meta(result, error) : meta;
@@ -350,146 +327,119 @@ export async function generateFailureReport({
       : null);
 
   const failingJobs = filterFailingJobs(jobs);
-  const detailedJobs = [];
   debugLog('jobs:evaluated', {
     runId,
     jobCount: Array.isArray(jobs) ? jobs.length : null,
     failingJobs: failingJobs.length
   });
 
-  for (const job of failingJobs) {
-    debugLog('job:start', {
-      runId,
-      jobId: job.id,
-      jobName: job.name
-    });
-    const details = await measure({
-      collectionName: 'jobPhases',
-      name: 'actions.getJob',
-      fn: () => getJob(job.id),
-      meta: () => ({
-        jobId: job.id,
-        jobName: job.name
-      }),
-      progressEvent: {
-        name: `actions.getJob:${job.id}`,
-        label: `Fetching job details for "${job.name}"`
-      }
-    });
-
-    const failingSteps = filterFailingSteps(details.steps);
-    if (failingSteps.length === 0) {
-      continue;
-    }
-
-    const jobHtmlUrl =
-      details.html_url ||
-      job.html_url ||
-      (owner && repoName
-        ? `https://github.com/${owner}/${repoName}/actions/runs/${runId}/job/${job.id}`
-        : null);
-
-    safeProgress(progressReporter, 'jobStart', {
-      jobId: job.id,
-      jobName: job.name,
-      failingStepCount: failingSteps.length
-    });
-
-    const jobProcessingStart = timeProvider.now();
-
-    const steps = [];
-
-    for (const step of failingSteps) {
-      const stepProcessingStart = timeProvider.now();
-      const stepMetadata = {
-        jobId: job.id,
-        jobName: job.name,
-        stepNumber: step.number,
-        stepName: step.name
-      };
-
-      debugLog('step:start', {
+  // 并行处理所有失败的 Jobs
+  const jobResults = await Promise.allSettled(
+    failingJobs.map(async (job) => {
+      debugLog('job:start', {
         runId,
         jobId: job.id,
-        jobName: job.name,
-        stepNumber: step.number,
-        stepName: step.name
+        jobName: job.name
+      });
+      const details = await measure({
+        collectionName: 'jobPhases',
+        name: 'actions.getJob',
+        fn: () => getJob(job.id),
+        meta: () => ({
+          jobId: job.id,
+          jobName: job.name
+        }),
+        progressEvent: {
+          name: `actions.getJob:${job.id}`,
+          label: `Fetching job details for "${job.name}"`
+        }
       });
 
-      safeProgress(progressReporter, 'stepStart', stepMetadata);
-      safeProgress(progressReporter, 'stepLogFetchStart', stepMetadata);
+      const failingSteps = filterFailingSteps(details.steps);
+      if (failingSteps.length === 0) {
+        return null; // 没有失败的 steps，跳过此 job
+      }
 
-      const stepLogStart = timeProvider.now();
-      let stepResult;
-      let stepLogError;
-      try {
-        stepResult = await getStepLog(job.id, step.number);
-      } catch (err) {
-        stepLogError = err;
-        throw err;
-      } finally {
-        const stepLogEnd = timeProvider.now();
-        if (timings) {
-          timings.stepLogDownloads.push({
-            name: 'stepLog.fetch',
+      const jobHtmlUrl =
+        details.html_url ||
+        job.html_url ||
+        (owner && repoName
+          ? `https://github.com/${owner}/${repoName}/actions/runs/${runId}/job/${job.id}`
+          : null);
+
+      safeProgress(progressReporter, 'jobStart', {
+        jobId: job.id,
+        jobName: job.name,
+        failingStepCount: failingSteps.length
+      });
+
+      const jobProcessingStart = timeProvider.now();
+
+      // 并行处理所有失败的 Steps
+      const stepResults = await Promise.allSettled(
+        failingSteps.map(async (step) => {
+          const stepProcessingStart = timeProvider.now();
+          const stepMetadata = {
             jobId: job.id,
             jobName: job.name,
             stepNumber: step.number,
-            stepName: step.name,
-            fromCache: false,
-            startedAtMs: toRelativeMs(stepLogStart),
-            endedAtMs: toRelativeMs(stepLogEnd),
-            durationMs: toDurationMs(stepLogEnd - stepLogStart),
-            ...(stepLogError
-              ? { error: stepLogError.message || String(stepLogError) }
-              : {})
-          });
-        }
+            stepName: step.name
+          };
 
-        safeProgress(progressReporter, 'stepLogFetchComplete', {
-          ...stepMetadata,
-          durationMs: toDurationMs(stepLogEnd - stepLogStart),
-          error: stepLogError ? stepLogError.message || String(stepLogError) : undefined
-        });
-      }
-
-      const extractedContexts = await measure({
-        collectionName: 'contextExtraction',
-        name: 'logs.extractErrorContexts',
-        fn: async () =>
-          extractErrorContexts(stepResult.log, {
-            stepName: step.name,
+          debugLog('step:start', {
+            runId,
+            jobId: job.id,
             jobName: job.name,
-            enableFinalErrorFallback: true
-          }),
-        meta: (result) => ({
-          jobId: job.id,
-          jobName: job.name,
-          stepNumber: step.number,
-          stepName: step.name,
-          contextCount: Array.isArray(result) ? result.length : 0
-        })
-      });
+            stepNumber: step.number,
+            stepName: step.name
+          });
 
-      const contextsWithGrafana = applyGrafanaContext(
-        extractedContexts,
-        namespace,
-        grafanaUrlBuilder
-      );
+          safeProgress(progressReporter, 'stepStart', stepMetadata);
+          safeProgress(progressReporter, 'stepLogFetchStart', stepMetadata);
 
-      const stepProcessingEnd = timeProvider.now();
-      if (timings) {
-        timings.stepTimings.push({
-          name: 'step.process',
-          jobId: job.id,
-          jobName: job.name,
-          stepNumber: step.number,
-          stepName: step.name,
-          startedAtMs: toRelativeMs(stepProcessingStart),
-          endedAtMs: toRelativeMs(stepProcessingEnd),
-          durationMs: toDurationMs(stepProcessingEnd - stepProcessingStart)
-        });
-      }
+          const stepLogStart = timeProvider.now();
+          let stepResult;
+          let stepLogError;
+          try {
+            stepResult = await getStepLog(job.id, step.number);
+          } catch (err) {
+            stepLogError = err;
+            throw err;
+          } finally {
+            const stepLogEnd = timeProvider.now();
+
+            safeProgress(progressReporter, 'stepLogFetchComplete', {
+              ...stepMetadata,
+              durationMs: toDurationMs(stepLogEnd - stepLogStart),
+              error: stepLogError ? stepLogError.message || String(stepLogError) : undefined
+            });
+          }
+
+          const extractedContexts = await measure({
+            collectionName: 'contextExtraction',
+            name: 'logs.extractErrorContexts',
+            fn: async () =>
+              extractErrorContexts(stepResult.log, {
+                stepName: step.name,
+                jobName: job.name,
+                enableFinalErrorFallback: true
+              }),
+            meta: (result) => ({
+              jobId: job.id,
+              jobName: job.name,
+              stepNumber: step.number,
+              stepName: step.name,
+              contextCount: Array.isArray(result) ? result.length : 0
+            })
+          });
+
+          const contextsWithGrafana = applyGrafanaContext(
+            extractedContexts,
+            namespace,
+            grafanaUrlBuilder
+          );
+
+          const stepProcessingEnd = timeProvider.now();
 
           const stepInfo = formatStep({
             job,
@@ -503,62 +453,89 @@ export async function generateFailureReport({
             actionsClient
           });
 
-      safeProgress(progressReporter, 'stepComplete', {
-        ...stepMetadata,
-        durationMs: toDurationMs(stepProcessingEnd - stepProcessingStart),
-        contextCount: extractedContexts?.length ?? 0
+          safeProgress(progressReporter, 'stepComplete', {
+            ...stepMetadata,
+            durationMs: toDurationMs(stepProcessingEnd - stepProcessingStart),
+            contextCount: extractedContexts?.length ?? 0
+          });
+
+          debugLog('step:complete', {
+            runId,
+            jobId: job.id,
+            jobName: job.name,
+            stepNumber: step.number,
+            stepName: step.name,
+            contextCount: extractedContexts?.length ?? 0
+          });
+
+          return stepInfo;
+        })
+      );
+
+      // 处理 step 结果，过滤掉失败的
+      const steps = stepResults
+        .filter((result) => result.status === 'fulfilled')
+        .map((result) => result.value);
+
+      // 记录失败的 steps
+      stepResults.forEach((result, index) => {
+        if (result.status === 'rejected') {
+          const step = failingSteps[index];
+          debugLog('step:error', {
+            runId,
+            jobId: job.id,
+            jobName: job.name,
+            stepNumber: step?.number,
+            stepName: step?.name,
+            error: result.reason?.message || String(result.reason)
+          });
+        }
       });
 
-      steps.push(stepInfo);
+      const jobProcessingEnd = timeProvider.now();
 
-      debugLog('step:complete', {
+      safeProgress(progressReporter, 'jobComplete', {
+        jobId: job.id,
+        jobName: job.name,
+        durationMs: toDurationMs(jobProcessingEnd - jobProcessingStart),
+        stepCount: steps.length
+      });
+
+      debugLog('job:complete', {
         runId,
         jobId: job.id,
         jobName: job.name,
-        stepNumber: step.number,
-        stepName: step.name,
-        contextCount: extractedContexts?.length ?? 0
+        processedSteps: steps.length
       });
-    }
 
-    const jobProcessingEnd = timeProvider.now();
-    if (timings) {
-      timings.jobPhases.push({
-        name: 'job.processFailingSteps',
-        jobId: job.id,
-        jobName: job.name,
-        failingStepCount: failingSteps.length,
-        startedAtMs: toRelativeMs(jobProcessingStart),
-        endedAtMs: toRelativeMs(jobProcessingEnd),
-        durationMs: toDurationMs(jobProcessingEnd - jobProcessingStart)
-      });
-    }
-
-    safeProgress(progressReporter, 'jobComplete', {
-      jobId: job.id,
-      jobName: job.name,
-      durationMs: toDurationMs(jobProcessingEnd - jobProcessingStart),
-      stepCount: steps.length
-    });
-
-    debugLog('job:complete', {
-      runId,
-      jobId: job.id,
-      jobName: job.name,
-      processedSteps: steps.length
-    });
-
-    detailedJobs.push(
-      formatJobDetails({
+      return formatJobDetails({
         job,
         details,
         steps,
         jobHtmlUrl,
         actionsClient,
         runId
-      })
-    );
-  }
+      });
+    })
+  );
+
+  // 处理 job 结果，过滤掉失败的和 null 的
+  const detailedJobs = jobResults
+    .filter((result) => result.status === 'fulfilled' && result.value !== null)
+    .map((result) => result.value);
+
+  // 记录失败的 jobs
+  jobResults.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      const job = failingJobs[index];
+      debugLog('job:error', {
+        runId,
+        jobId: job?.id,
+        jobName: job?.name,
+        error: result.reason?.message || String(result.reason)
+      });
+    }
+  });
 
   const summary = {
     totalJobs: Array.isArray(jobs) ? jobs.length : 0,
@@ -594,11 +571,6 @@ export async function generateFailureReport({
     grafanaUrl: defaultGrafanaUrl,
     jobs: detailedJobs
   };
-
-  if (includeTimings && timings) {
-    timings.totalDurationMs = toDurationMs(timeProvider.now() - runStartedAt);
-    result.timings = timings;
-  }
 
   debugLog('generate:resultReady', {
     runId,

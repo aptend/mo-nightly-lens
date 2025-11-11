@@ -87,7 +87,7 @@ daily-check/
 
 ## CLI 脚本
 
-- `node scripts/fetch-failure-report.js --run <runId> [--with-logs] [--with-timings] [--repo org/repo]`  
+- `node scripts/fetch-failure-report.js --run <runId> [--with-logs] [--repo org/repo]`  
   核心脚本，生成 `reports/failure-report-<runId>.json`，可选落盘失败步骤日志。
 
 - `node scripts/fetch-namespace.js [--repo org/repo] [--workflow file.yaml]`  

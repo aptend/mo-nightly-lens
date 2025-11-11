@@ -125,7 +125,6 @@ export async function runFetchFailureReport({
   const repo = args.repo;
   const runId = args.run || args.runId || args['run-id'];
   const downloadLogs = Boolean(args['with-logs'] || args['download-logs']);
-  const includeTimings = Boolean(args['with-timings'] || args['include-timings']);
 
   if (!runId) {
     throw new Error('Please specify run ID via --run <id>');
@@ -144,8 +143,7 @@ export async function runFetchFailureReport({
     runId,
     includeLogs: downloadLogs,
     logOutputDir: logsDir,
-    progress: progressReporter,
-    includeTimings
+    progress: progressReporter
   });
 
   printReportSummary(report);

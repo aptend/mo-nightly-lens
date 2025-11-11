@@ -56,15 +56,110 @@ class GitHubActionsExtension {
       this.uiRenderer = null;
     }
     this.workflowData = new Map();
-    this.runStates = new Map();
-    this.failureReports = new Map();
-    this.timelineOpen = new Set();
     this.stylesInjected = false;
-    this.progressListenerRegistered = false;
     this.issueBuilderFn = issueModule?.buildIssuePayload || null;
     this.issueBuilderModulePath = 'modules/issues/context-issue-builder-browser.js';
     this.issueBuilderLoadingPromise = null;
-    this.registerProgressListener();
+    
+    // 使用新的模块化组件
+    this.stateManager = null;
+    this.progressListener = null;
+    this.initModules();
+  }
+
+  async initModules() {
+    // 动态导入模块（因为它们在 web_accessible_resources 中）
+    try {
+      const stateManagerModule = await import(chrome.runtime.getURL('modules/content/state-manager.js'));
+      const progressListenerModule = await import(chrome.runtime.getURL('modules/content/progress-listener.js'));
+      
+      this.stateManager = new stateManagerModule.StateManager();
+      this.progressListener = new progressListenerModule.ProgressListener(
+        this.stateManager,
+        (runId, stateUpdate) => {
+          // 进度更新回调
+          this.handleProgressUpdate(runId, stateUpdate);
+        }
+      );
+      
+      this.progressListener.register();
+    } catch (error) {
+      console.warn('[GitHub Actions Extension] Failed to load content modules, using fallback:', error);
+      // Fallback: 使用内联实现
+      this.stateManager = this.createFallbackStateManager();
+      this.progressListener = null;
+      this.registerProgressListener();
+      this.startProgressPolling();
+    }
+  }
+
+  createFallbackStateManager() {
+    // Fallback 实现 - 使用内联状态管理
+    const fallbackState = {
+      runStates: new Map(),
+      failureReports: new Map(),
+      timelineOpen: new Set()
+    };
+    
+    return {
+      runStates: fallbackState.runStates,
+      failureReports: fallbackState.failureReports,
+      timelineOpen: fallbackState.timelineOpen,
+      getRunState: (runId) => {
+        if (fallbackState.runStates.has(runId)) {
+          return fallbackState.runStates.get(runId);
+        }
+        if (fallbackState.failureReports.has(runId)) {
+          return { status: 'ready', message: 'Failure report available' };
+        }
+        return { status: 'idle', message: null };
+      },
+      setRunState: (runId, state) => {
+        fallbackState.runStates.set(runId, state);
+      },
+      getFailureReport: (runId) => fallbackState.failureReports.get(runId) || null,
+      setFailureReport: (runId, report) => {
+        if (report) {
+          fallbackState.failureReports.set(runId, report);
+        } else {
+          fallbackState.failureReports.delete(runId);
+        }
+      },
+      updateFailureReportsCache: (reports) => {
+        Object.entries(reports || {}).forEach(([runId, report]) => {
+          if (report) {
+            fallbackState.failureReports.set(runId, report);
+          }
+        });
+      },
+      isTimelineOpen: (runId) => fallbackState.timelineOpen.has(runId),
+      toggleTimeline: (runId) => {
+        if (fallbackState.timelineOpen.has(runId)) {
+          fallbackState.timelineOpen.delete(runId);
+        } else {
+          fallbackState.timelineOpen.add(runId);
+        }
+      },
+      getAllRunIds: () => Array.from(fallbackState.runStates.keys())
+    };
+  }
+
+  handleProgressUpdate(runId, stateUpdate) {
+    // 当进度更新时，更新 UI
+    let item = this.workflowData.get(runId);
+    if (!item || !document.contains(item)) {
+      const refreshed = this.findWorkflowItemByRunId(runId);
+      if (refreshed) {
+        this.workflowData.set(runId, refreshed);
+        item = refreshed;
+      } else {
+        item = null;
+      }
+    }
+    const report = this.stateManager.getFailureReport(runId);
+    if (item) {
+      this.renderRunActions(item, runId, report);
+    }
   }
 
   async init() {
@@ -892,28 +987,12 @@ class GitHubActionsExtension {
   }
 
   updateFailureReportsCache(reportData = {}) {
-    if (!reportData || typeof reportData !== 'object') {
+    if (!this.stateManager) {
+      // 如果 stateManager 还没初始化，等待一下
+      setTimeout(() => this.updateFailureReportsCache(reportData), 100);
       return;
     }
-
-    Object.entries(reportData).forEach(([runId, report]) => {
-      if (!runId) {
-        return;
-      }
-      if (report) {
-        this.failureReports.set(runId, report);
-        this.setRunState(runId, {
-          status: 'ready',
-          message: 'Failure report available'
-        });
-      } else {
-        this.failureReports.delete(runId);
-        this.setRunState(runId, {
-          status: 'idle',
-          message: null
-        });
-      }
-    });
+    this.stateManager.updateFailureReportsCache(reportData);
   }
 
   renderRunActions(item, runId, reportFromStorage = null) {
@@ -923,26 +1002,26 @@ class GitHubActionsExtension {
 
     this.injectStyles();
 
-    if (reportFromStorage && !this.failureReports.has(runId)) {
-      this.failureReports.set(runId, reportFromStorage);
+    if (reportFromStorage && this.stateManager) {
+      const existing = this.stateManager.getFailureReport(runId);
+      if (!existing) {
+        this.stateManager.setFailureReport(runId, reportFromStorage);
+      }
     }
 
     const controls = this.getOrCreateRunControls(item, runId);
     const state = this.getRunState(runId);
 
-    const report = this.failureReports.get(runId) || reportFromStorage || null;
-    if (report && state.status !== 'loading') {
-      this.setRunState(runId, {
-        status: 'ready',
-        message: 'Failure report available'
-      });
+    const report = (this.stateManager ? this.stateManager.getFailureReport(runId) : null) || reportFromStorage || null;
+    if (report && state.status !== 'loading' && this.stateManager) {
+      this.stateManager.setFailureReport(runId, report);
     }
 
     const effectiveState = this.getRunState(runId);
     const isReady = effectiveState.status === 'ready';
     const isLoading = effectiveState.status === 'loading';
     const isError = effectiveState.status === 'error';
-    const timelineIsOpen = this.timelineOpen.has(runId);
+    const timelineIsOpen = this.stateManager ? this.stateManager.isTimelineOpen(runId) : false;
 
     controls.button.disabled = isLoading;
     controls.button.classList.toggle('dc-action-button--loading', isLoading);
@@ -998,12 +1077,10 @@ class GitHubActionsExtension {
       return;
     }
 
-    const existingReport = this.failureReports.get(runId);
+    const existingReport = this.stateManager ? this.stateManager.getFailureReport(runId) : null;
     if (existingReport && currentState.status === 'ready') {
-      if (this.timelineOpen.has(runId)) {
-        this.timelineOpen.delete(runId);
-      } else {
-        this.timelineOpen.add(runId);
+      if (this.stateManager) {
+        this.stateManager.toggleTimeline(runId);
       }
       this.renderRunActions(item, runId, existingReport);
       return;
@@ -1019,12 +1096,10 @@ class GitHubActionsExtension {
         throw new Error('Empty failure report received');
       }
       console.debug('[GitHub Actions Extension] Failure report response received', { runId });
-      this.failureReports.set(runId, response);
-      this.setRunState(runId, {
-        status: 'ready',
-        message: 'Failure report available'
-      });
-      this.timelineOpen.add(runId);
+      if (this.stateManager) {
+        this.stateManager.setFailureReport(runId, response);
+        this.stateManager.toggleTimeline(runId);
+      }
       this.renderRunActions(item, runId, response);
     } catch (error) {
       console.error('[GitHub Actions Extension] Failed to generate failure report:', error);
@@ -1037,42 +1112,17 @@ class GitHubActionsExtension {
   }
 
   getRunState(runId) {
-    if (this.runStates.has(runId)) {
-      return this.runStates.get(runId);
+    if (!this.stateManager) {
+      return { status: 'idle', message: null };
     }
-
-    if (this.failureReports.has(runId)) {
-      const readyState = { status: 'ready', message: 'Failure report available' };
-      this.runStates.set(runId, readyState);
-      return readyState;
-    }
-
-    const defaultState = { status: 'idle', message: null };
-    this.runStates.set(runId, defaultState);
-    return defaultState;
+    return this.stateManager.getRunState(runId);
   }
 
   setRunState(runId, state) {
-    const previous = this.runStates.get(runId) || { status: 'idle', message: null };
-    const next = {
-      status: Object.prototype.hasOwnProperty.call(state, 'status')
-        ? state.status
-        : previous.status,
-      message: Object.prototype.hasOwnProperty.call(state, 'message')
-        ? state.message
-        : previous.message,
-      progress: Object.prototype.hasOwnProperty.call(state, 'progress')
-        ? state.progress
-        : previous.progress,
-      error: Object.prototype.hasOwnProperty.call(state, 'error')
-        ? state.error
-        : previous.error
-    };
-    console.debug('[GitHub Actions Extension] setRunState', runId, {
-      previous,
-      next
-    });
-    this.runStates.set(runId, next);
+    if (!this.stateManager) {
+      return;
+    }
+    this.stateManager.setRunState(runId, state);
   }
 
   getOrCreateRunControls(item, runId) {
@@ -1918,9 +1968,14 @@ class GitHubActionsExtension {
       return;
     }
 
-    const { runId, payload } = message;
+    const { runId, payload, timestamp } = message;
     if (!runId || !payload) {
       return;
+    }
+
+    // 更新最后接收时间戳
+    if (timestamp) {
+      this.lastProgressTimestamp.set(runId, timestamp);
     }
 
     const type = payload.type || 'status';
@@ -1967,9 +2022,96 @@ class GitHubActionsExtension {
         item = null;
       }
     }
-    const report = this.failureReports.get(runId) || null;
+    const report = this.stateManager ? this.stateManager.getFailureReport(runId) : null;
     if (item) {
       this.renderRunActions(item, runId, report);
+    }
+  }
+
+  /**
+   * 启动进度轮询（从 chrome.storage 读取备份消息）
+   */
+  startProgressPolling() {
+    if (this.progressPollInterval) {
+      return;
+    }
+
+    // 每 3 秒轮询一次 storage 中的进度消息
+    this.progressPollInterval = setInterval(() => {
+      this.pollProgressFromStorage().catch(err => {
+        console.warn('[GitHub Actions Extension] Progress polling error:', err);
+      });
+    }, 3000);
+
+    // 立即轮询一次
+    this.pollProgressFromStorage().catch(err => {
+      console.warn('[GitHub Actions Extension] Initial progress polling error:', err);
+    });
+  }
+
+  /**
+   * 停止进度轮询
+   */
+  stopProgressPolling() {
+    if (this.progressPollInterval) {
+      clearInterval(this.progressPollInterval);
+      this.progressPollInterval = null;
+    }
+  }
+
+  /**
+   * 从 chrome.storage 轮询进度消息
+   */
+  async pollProgressFromStorage() {
+    // 获取所有正在加载的 runId
+    const activeRunIds = Array.from(this.runStates.keys()).filter(runId => {
+      const state = this.runStates.get(runId);
+      return state && state.status === 'loading';
+    });
+
+    if (activeRunIds.length === 0) {
+      return;
+    }
+
+    // 检查每个 runId 的进度消息
+    for (const runId of activeRunIds) {
+      try {
+        const key = `progress_${runId}`;
+        const result = await chrome.storage.local.get(key);
+        const progressList = result[key] || [];
+
+        if (progressList.length === 0) {
+          continue;
+        }
+
+        // 获取最后已知的时间戳
+        const lastTimestamp = this.lastProgressTimestamp.get(runId) || 0;
+
+        // 处理新的消息
+        for (const item of progressList) {
+          const itemTimestamp = item.timestamp || 0;
+          if (itemTimestamp > lastTimestamp) {
+            // 这是一个新消息，处理它
+            this.handleFailureReportProgress({
+              action: 'failureReportProgress',
+              runId,
+              payload: item.payload,
+              timestamp: itemTimestamp
+            });
+          }
+        }
+
+        // 更新最后时间戳
+        if (progressList.length > 0) {
+          const latest = progressList[progressList.length - 1];
+          const latestTimestamp = latest.timestamp || 0;
+          if (latestTimestamp > lastTimestamp) {
+            this.lastProgressTimestamp.set(runId, latestTimestamp);
+          }
+        }
+      } catch (error) {
+        console.warn(`[GitHub Actions Extension] Failed to poll progress for runId ${runId}:`, error);
+      }
     }
   }
 }

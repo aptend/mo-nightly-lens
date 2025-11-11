@@ -27,7 +27,10 @@
     {
       "resources": [
         "modules/*.js",
+        "modules/**/*.js",
         "modules/issues/*.js",
+        "modules/content/*.js",
+        "modules/background/*.js",
         "config/bug-report.md"
       ],
       "matches": [

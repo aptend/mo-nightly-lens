@@ -1,0 +1,25 @@
+{
+  "github": {
+    "token": "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "apiBase": "https://api.github.com",
+    "session": {
+      "cookies": {
+        "user_session": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "_gh_sess": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "proxyUrl": ""
+    }
+  },
+  "aiSummaries": {
+    "provider": "dashscope",
+    "apiKey": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "apiBase": "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation",
+    "model": "qwen-max",
+    "enabled": true,
+    "summaries": {
+      "model": "qwen-max",
+      "enabled": true
+    }
+  }
+}
+
