@@ -5,116 +5,317 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GitHub Actions Extension</title>
   <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      width: 360px;
+      height: 100%;
+      overflow-y: auto;
+      overflow-x: hidden;
+      /* Firefox scrollbar */
+      scrollbar-width: thin;
+      scrollbar-color: rgba(0, 0, 0, 0.12) transparent;
+    }
+
+    /* Custom scrollbar styling for WebKit browsers */
+    html::-webkit-scrollbar {
+      width: 3px !important;
+    }
+
+    html::-webkit-scrollbar-track {
+      background: transparent !important;
+    }
+
+    html::-webkit-scrollbar-thumb {
+      background: rgba(0, 0, 0, 0.12) !important;
+      border-radius: 3px !important;
+      transition: background 0.2s ease !important;
+    }
+
+    html::-webkit-scrollbar-thumb:hover {
+      background: rgba(0, 0, 0, 0.2) !important;
+    }
+
     body {
-      width: 300px;
-      padding: 16px;
+      width: 360px;
+      margin: 0;
+      padding: 0;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
       font-size: 14px;
+      background: linear-gradient(135deg, #f5f7fa 0%, #ffffff 100%);
+      color: #24292f;
+      overflow-y: auto;
+      overflow-x: hidden;
+      /* Firefox scrollbar */
+      scrollbar-width: thin;
+      scrollbar-color: rgba(0, 0, 0, 0.12) transparent;
+    }
+
+    /* Custom scrollbar styling for WebKit browsers */
+    body::-webkit-scrollbar {
+      width: 3px !important;
+    }
+
+    body::-webkit-scrollbar-track {
+      background: transparent !important;
+    }
+
+    body::-webkit-scrollbar-thumb {
+      background: rgba(0, 0, 0, 0.12) !important;
+      border-radius: 3px !important;
+      transition: background 0.2s ease !important;
+    }
+
+    body::-webkit-scrollbar-thumb:hover {
+      background: rgba(0, 0, 0, 0.2) !important;
+    }
+    
+    .container {
+      padding: 20px;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 2px solid #e1e8ed;
+    }
+
+    .header-icon {
+      font-size: 24px;
+      line-height: 1;
     }
     
     h1 {
-      font-size: 18px;
-      margin: 0 0 16px 0;
+      font-size: 20px;
+      margin: 0;
+      font-weight: 600;
       color: #24292f;
+      letter-spacing: -0.3px;
     }
     
     .section {
-      margin-bottom: 16px;
+      background: white;
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 12px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05), 0 1px 2px rgba(0, 0, 0, 0.1);
+      transition: box-shadow 0.2s ease, transform 0.2s ease;
+    }
+
+    .section:hover {
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.07), 0 2px 4px rgba(0, 0, 0, 0.06);
     }
     
     .section-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
       font-weight: 600;
-      margin-bottom: 8px;
+      margin-bottom: 12px;
       color: #24292f;
+      font-size: 15px;
+    }
+
+    .section-icon {
+      font-size: 16px;
+      opacity: 0.7;
     }
     
-    input[type="text"], input[type="password"] {
+    input[type="text"], 
+    input[type="password"] {
       width: 100%;
-      padding: 6px 12px;
-      border: 1px solid #d1d9e0;
-      border-radius: 6px;
+      padding: 10px 14px;
+      border: 2px solid #e1e8ed;
+      border-radius: 8px;
       font-size: 14px;
-      box-sizing: border-box;
+      transition: all 0.2s ease;
+      background: #fafbfc;
+      color: #24292f;
+    }
+
+    input[type="text"]:focus,
+    input[type="password"]:focus {
+      outline: none;
+      border-color: #0969da;
+      background: white;
+      box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.1);
+    }
+
+    input[type="text"]::placeholder,
+    input[type="password"]::placeholder {
+      color: #8c959f;
     }
     
     button {
       width: 100%;
-      padding: 8px 16px;
-      background-color: #0969da;
+      padding: 10px 16px;
+      background: linear-gradient(135deg, #0969da 0%, #0550ae 100%);
       color: white;
       border: none;
-      border-radius: 6px;
+      border-radius: 8px;
       font-size: 14px;
       font-weight: 500;
       cursor: pointer;
-      margin-top: 8px;
+      margin-top: 10px;
+      transition: all 0.2s ease;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
     }
     
     button:hover {
-      background-color: #0860ca;
+      background: linear-gradient(135deg, #0860ca 0%, #033d8b 100%);
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+      transform: translateY(-1px);
+    }
+
+    button:active {
+      transform: translateY(0);
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
     }
     
     .status {
-      padding: 8px;
-      border-radius: 6px;
-      margin-top: 8px;
-      font-size: 12px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      margin-top: 10px;
+      font-size: 13px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      animation: slideIn 0.3s ease;
+    }
+
+    @keyframes slideIn {
+      from {
+        opacity: 0;
+        transform: translateY(-5px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
     }
     
     .status.success {
-      background-color: #dafbe1;
+      background: linear-gradient(135deg, #dafbe1 0%, #c2f4d0 100%);
       color: #1a7f37;
+      border: 1px solid #a3d9a8;
     }
     
     .status.error {
-      background-color: #ffebe9;
+      background: linear-gradient(135deg, #ffebe9 0%, #ffe0e0 100%);
       color: #cf222e;
+      border: 1px solid #ffb3b3;
+    }
+
+    .status-icon {
+      font-size: 14px;
     }
     
     .info {
       font-size: 12px;
       color: #656d76;
-      margin-top: 8px;
+      margin-top: 10px;
+      line-height: 1.5;
+    }
+
+    .info code {
+      background: #f6f8fa;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
+      color: #0969da;
+      border: 1px solid #e1e8ed;
     }
     
     a {
       color: #0969da;
       text-decoration: none;
+      font-weight: 500;
+      transition: color 0.2s ease;
     }
     
     a:hover {
+      color: #0550ae;
       text-decoration: underline;
+    }
+
+    #toggleExtensionBtn.disable {
+      background: linear-gradient(135deg, #cf222e 0%, #a40e26 100%);
+    }
+
+    #toggleExtensionBtn.disable:hover {
+      background: linear-gradient(135deg, #b91c2c 0%, #8b0e1f 100%);
+    }
+
+    #toggleExtensionBtn.enable {
+      background: linear-gradient(135deg, #1a7f37 0%, #116329 100%);
+    }
+
+    #toggleExtensionBtn.enable:hover {
+      background: linear-gradient(135deg, #15803d 0%, #0e4e1f 100%);
+    }
+
+    .divider {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, #e1e8ed, transparent);
+      margin: 16px 0;
     }
   </style>
 </head>
 <body>
-  <h1>GitHub Actions Extension</h1>
-  
-  <div class="section">
-    <div class="section-title">GitHub Token</div>
-    <input type="password" id="tokenInput" placeholder="Enter GitHub Personal Access Token">
-    <button id="saveTokenBtn">Save Token</button>
-    <div id="tokenStatus" class="status" style="display: none;"></div>
-    <div class="info">
-      <a href="https://github.com/settings/tokens" target="_blank">Create a token here</a>
-      <br>
-      Required scopes: <code>repo</code>, <code>actions:read</code>
+  <div class="container">
+    <div class="header">
+      <span class="header-icon">⚡</span>
+      <h1>GitHub Actions</h1>
     </div>
-  </div>
+    
+    <div class="section">
+      <div class="section-title">
+        <span class="section-icon">⚙️</span>
+        <span>Extension Control</span>
+      </div>
+      <button id="toggleExtensionBtn">Disable Extension</button>
+      <div id="enableStatus" class="status" style="margin-top: 10px; display: block;"></div>
+      <div class="info" style="margin-top: 10px;">
+        When disabled, the extension will not run on GitHub Actions pages.
+      </div>
+    </div>
 
-  <div class="section">
-    <div class="section-title">AI Summary Token</div>
-    <input type="password" id="aiTokenInput" placeholder="Enter DashScope (Qianwen) API Key">
-    <button id="saveAiTokenBtn">Save AI Token</button>
-    <div id="aiTokenStatus" class="status" style="display: none;"></div>
-    <div class="info">
-      Provider: <code>dashscope.aliyuncs.com</code>. The key will only be stored locally in this browser.
+    <div class="section">
+      <div class="section-title">
+        <span class="section-icon">🔑</span>
+        <span>GitHub Token</span>
+      </div>
+      <input type="password" id="tokenInput" placeholder="Enter GitHub Personal Access Token">
+      <button id="saveTokenBtn">Save Token</button>
+      <div id="tokenStatus" class="status" style="display: none;"></div>
+      <div class="info">
+        <a href="https://github.com/settings/tokens" target="_blank">Create a token here</a>
+        <br>
+        Required scopes: <code>repo</code>, <code>actions:read</code>
+      </div>
     </div>
-  </div>
-  
-  <div class="section">
-    <div class="section-title">Extension Status</div>
-    <div id="extensionStatus">Ready</div>
+
+    <div class="section">
+      <div class="section-title">
+        <span class="section-icon">🤖</span>
+        <span>AI Summary Token</span>
+      </div>
+      <input type="password" id="aiTokenInput" placeholder="Enter DashScope (Qianwen) API Key">
+      <button id="saveAiTokenBtn">Save AI Token</button>
+      <div id="aiTokenStatus" class="status" style="display: none;"></div>
+      <div class="info">
+        Provider: <code>dashscope.aliyuncs.com</code>
+        <br>
+        The key will only be stored locally in this browser.
+      </div>
+    </div>
   </div>
   
   <script src="popup.js"></script>

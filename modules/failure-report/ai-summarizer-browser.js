@@ -38,9 +38,7 @@ function buildPromptInput(report, contexts) {
     run: {
       id: report?.run?.id ?? null,
       name: report?.run?.name ?? null,
-      conclusion: report?.run?.conclusion ?? null,
-      createdAt: report?.run?.createdAt ?? null,
-      updatedAt: report?.run?.updatedAt ?? null
+      conclusion: report?.run?.conclusion ?? null
     },
     summary: report?.summary ?? null,
     contexts: contexts.map(({ contextId, job, step, context }) => ({
@@ -55,8 +53,7 @@ function buildPromptInput(report, contexts) {
         name: step?.name ?? null,
         conclusion: step?.conclusion ?? null
       },
-      snippet: context?.snippet ?? '',
-      grafanaUrl: context?.grafanaUrl ?? null
+      snippet: context?.snippet ?? ''
     }))
   };
 }

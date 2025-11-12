@@ -9,22 +9,84 @@ document.addEventListener('DOMContentLoaded', () => {
   const saveAiTokenBtn = document.getElementById('saveAiTokenBtn');
   const aiTokenStatus = document.getElementById('aiTokenStatus');
 
-  const extensionStatus = document.getElementById('extensionStatus');
+  const toggleExtensionBtn = document.getElementById('toggleExtensionBtn');
+  const enableStatus = document.getElementById('enableStatus');
 
-  // Load saved tokens
-  chrome.storage.local.get(['githubToken', 'aiSummaryApiKey'], (result) => {
+  // Helper function to set status message with icon
+  function setStatus(element, message, isSuccess) {
+    const icon = isSuccess ? '✓' : '✗';
+    element.innerHTML = `<span class="status-icon">${icon}</span>${message}`;
+    element.className = isSuccess ? 'status success' : 'status error';
+    element.style.display = 'flex';
+  }
+
+  // Load saved tokens and extension enabled state
+  chrome.storage.local.get(['githubToken', 'aiSummaryApiKey', 'extensionEnabled'], (result) => {
     if (result.githubToken) {
       tokenInput.value = '••••••••••••';
-      tokenStatus.textContent = 'Token saved';
-      tokenStatus.className = 'status success';
-      tokenStatus.style.display = 'block';
+      setStatus(tokenStatus, 'Token saved', true);
     }
 
     if (result.aiSummaryApiKey) {
       aiTokenInput.value = '••••••••••••';
-      aiTokenStatus.textContent = 'AI token saved';
-      aiTokenStatus.className = 'status success';
-      aiTokenStatus.style.display = 'block';
+      setStatus(aiTokenStatus, 'AI token saved', true);
+    }
+
+    // Load extension enabled state (default to true if not set)
+    const isEnabled = result.extensionEnabled !== false; // default to true
+    console.log('Loaded extension enabled state:', isEnabled);
+    updateToggleButton(isEnabled);
+  });
+
+  function updateToggleButton(isEnabled) {
+    console.log('Updating toggle button, enabled:', isEnabled);
+    toggleExtensionBtn.textContent = isEnabled ? 'Disable Extension' : 'Enable Extension';
+    toggleExtensionBtn.className = isEnabled ? 'disable' : 'enable';
+    setStatus(enableStatus, isEnabled ? 'Extension is enabled' : 'Extension is disabled', isEnabled);
+  }
+
+  // Handle enable/disable toggle
+  toggleExtensionBtn.addEventListener('click', async () => {
+    try {
+      console.log('Toggle button clicked');
+      const result = await chrome.storage.local.get(['extensionEnabled']);
+      const currentState = result.extensionEnabled !== false; // default to true
+      const newState = !currentState;
+      
+      console.log('Current state:', currentState, 'New state:', newState);
+      
+      await chrome.storage.local.set({ extensionEnabled: newState });
+      console.log('Storage updated, newState:', newState);
+      
+      // Verify the state was saved
+      const verify = await chrome.storage.local.get(['extensionEnabled']);
+      console.log('Verified storage value:', verify.extensionEnabled);
+      
+      updateToggleButton(newState);
+      
+      // Notify content scripts to reload
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      console.log('Current tabs:', tabs);
+      if (tabs[0] && tabs[0].id) {
+        try {
+          const response = await chrome.tabs.sendMessage(tabs[0].id, {
+            action: 'extensionEnabledChanged',
+            enabled: newState
+          });
+          console.log('Message sent to content script, enabled:', newState, 'response:', response);
+        } catch (error) {
+          console.warn('Failed to send message to content script:', error);
+          // If content script is not loaded, user will need to refresh the page
+          setStatus(enableStatus, newState 
+            ? 'Extension enabled. Please refresh the page.' 
+            : 'Extension disabled. Please refresh the page.', true);
+        }
+      } else {
+        console.warn('No active tab found');
+      }
+    } catch (error) {
+      console.error('Error toggling extension:', error);
+      setStatus(enableStatus, 'Error: ' + error.message, false);
     }
   });
 
@@ -33,9 +95,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const token = tokenInput.value.trim();
     
     if (!token) {
-      tokenStatus.textContent = 'Please enter a token';
-      tokenStatus.className = 'status error';
-      tokenStatus.style.display = 'block';
+      setStatus(tokenStatus, 'Please enter a token', false);
       return;
     }
 
@@ -46,20 +106,14 @@ document.addEventListener('DOMContentLoaded', () => {
         token: token
       }, (response) => {
         if (response?.success) {
-          tokenStatus.textContent = 'Token saved successfully!';
-          tokenStatus.className = 'status success';
-          tokenStatus.style.display = 'block';
+          setStatus(tokenStatus, 'Token saved successfully!', true);
           tokenInput.value = '••••••••••••';
         } else {
-          tokenStatus.textContent = 'Failed to save token: ' + (response?.error || 'Unknown error');
-          tokenStatus.className = 'status error';
-          tokenStatus.style.display = 'block';
+          setStatus(tokenStatus, 'Failed to save token: ' + (response?.error || 'Unknown error'), false);
         }
       });
     } catch (error) {
-      tokenStatus.textContent = 'Error: ' + error.message;
-      tokenStatus.className = 'status error';
-      tokenStatus.style.display = 'block';
+      setStatus(tokenStatus, 'Error: ' + error.message, false);
     }
   });
 
@@ -67,9 +121,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const token = aiTokenInput.value.trim();
 
     if (!token) {
-      aiTokenStatus.textContent = 'Please enter an AI summary token';
-      aiTokenStatus.className = 'status error';
-      aiTokenStatus.style.display = 'block';
+      setStatus(aiTokenStatus, 'Please enter an AI summary token', false);
       return;
     }
 
@@ -80,30 +132,13 @@ document.addEventListener('DOMContentLoaded', () => {
       },
       (response) => {
         if (response?.success) {
-          aiTokenStatus.textContent = 'AI token saved successfully!';
-          aiTokenStatus.className = 'status success';
-          aiTokenStatus.style.display = 'block';
+          setStatus(aiTokenStatus, 'AI token saved successfully!', true);
           aiTokenInput.value = '••••••••••••';
         } else {
-          aiTokenStatus.textContent =
-            'Failed to save AI token: ' + (response?.error || 'Unknown error');
-          aiTokenStatus.className = 'status error';
-          aiTokenStatus.style.display = 'block';
+          setStatus(aiTokenStatus, 'Failed to save AI token: ' + (response?.error || 'Unknown error'), false);
         }
       }
     );
-  });
-
-  // Check current page
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    const currentTab = tabs[0];
-    if (currentTab.url?.includes('github.com/matrixorigin/mo-nightly-regression/actions')) {
-      extensionStatus.textContent = 'Active on GitHub Actions page';
-      extensionStatus.style.color = '#1a7f37';
-    } else {
-      extensionStatus.textContent = 'Navigate to GitHub Actions page to use extension';
-      extensionStatus.style.color = '#656d76';
-    }
   });
 });
 

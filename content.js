@@ -1,10 +1,29 @@
 // Content script for GitHub Actions pages
 // This script runs on GitHub Actions pages and extracts workflow information
 
-// Load modules and initialize extension
-console.log('[GitHub Actions Extension] Content script loaded');
+// Check if extension is enabled before initializing
+let extensionInstance = null;
 
-(async () => {
+async function initializeExtension() {
+  // Check if extension is enabled
+  const result = await chrome.storage.local.get(['extensionEnabled']);
+  const isEnabled = result.extensionEnabled !== false; // default to true
+  
+  if (!isEnabled) {
+    console.log('[GitHub Actions Extension] Extension is disabled, skipping initialization');
+    // Make sure to clean up if already initialized
+    if (extensionInstance) {
+      await cleanupExtension();
+    }
+    return;
+  }
+
+  // If already initialized, don't initialize again
+  if (extensionInstance) {
+    console.log('[GitHub Actions Extension] Extension already initialized, skipping');
+    return;
+  }
+
   try {
     console.log('[GitHub Actions Extension] Loading modules...');
     const workflowModule = await import(chrome.runtime.getURL('modules/workflow/extractor.js'));
@@ -26,22 +45,86 @@ console.log('[GitHub Actions Extension] Content script loaded');
     console.log('[GitHub Actions Extension] Modules loaded successfully');
     
     // Initialize extension after modules are loaded
-    const extension = new GitHubActionsExtension(
+    extensionInstance = new GitHubActionsExtension(
       WorkflowExtractor,
       NamespaceExtractor,
       UIRenderer,
       issueModule
     );
     console.log('[GitHub Actions Extension] Initializing extension...');
-    await extension.init();
+    await extensionInstance.init();
     console.log('[GitHub Actions Extension] Extension initialized');
   } catch (error) {
     console.error('[GitHub Actions Extension] Failed to load modules:', error);
     console.error('[GitHub Actions Extension] Error details:', error.stack);
-    // Fallback: initialize with inline implementations
-    initFallback();
+    // Fallback: initialize with inline implementations (will check extensionEnabled internally)
+    await initFallback();
   }
-})();
+}
+
+async function cleanupExtension() {
+  if (extensionInstance) {
+    try {
+      if (typeof extensionInstance.cleanup === 'function') {
+        await extensionInstance.cleanup();
+      }
+    } catch (error) {
+      console.error('[GitHub Actions Extension] Error during cleanup:', error);
+    }
+    extensionInstance = null;
+  }
+  
+  // Also manually remove any remaining UI elements as a fallback
+  const allControls = document.querySelectorAll('.dc-run-controls, .dc-action-button, .dc-status-text, .dc-timeline, .dc-clear-button, [data-dc-namespace]');
+  allControls.forEach(element => {
+    try {
+      element.remove();
+    } catch (e) {
+      // Ignore errors
+    }
+  });
+  
+  // Remove injected styles
+  const styleElement = document.getElementById('daily-check-content-styles');
+  if (styleElement) {
+    try {
+      styleElement.remove();
+    } catch (e) {
+      // Ignore errors
+    }
+  }
+}
+
+// Load modules and initialize extension
+console.log('[GitHub Actions Extension] Content script loaded');
+initializeExtension();
+
+// Listen for enable/disable messages from popup
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === 'extensionEnabledChanged') {
+    console.log('[GitHub Actions Extension] Received extensionEnabledChanged message, enabled:', message.enabled);
+    
+    (async () => {
+      try {
+        // Always clean up first
+        await cleanupExtension();
+        
+        if (message.enabled) {
+          console.log('[GitHub Actions Extension] Extension enabled, initializing...');
+          await initializeExtension();
+        } else {
+          console.log('[GitHub Actions Extension] Extension disabled, cleanup completed');
+        }
+        sendResponse({ success: true });
+      } catch (error) {
+        console.error('[GitHub Actions Extension] Error handling extensionEnabledChanged:', error);
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    
+    return true; // Indicates we will send a response asynchronously
+  }
+});
 
 class GitHubActionsExtension {
   constructor(WorkflowExtractor, NamespaceExtractor, UIRenderer, issueModule) {
@@ -178,6 +261,66 @@ class GitHubActionsExtension {
     } else {
       console.log('[GitHub Actions Extension] Not a recognized page type. URL should contain /actions/runs/ or /actions/workflows/');
     }
+  }
+
+  async cleanup() {
+    console.log('[GitHub Actions Extension] Cleaning up extension...');
+    
+    // Stop progress polling
+    if (this.progressListener && typeof this.progressListener.stopPolling === 'function') {
+      this.progressListener.stopPolling();
+    }
+    
+    // Stop fallback progress polling
+    this.stopProgressPolling();
+    
+    // Disconnect MutationObserver
+    if (this.workflowListObserver) {
+      this.workflowListObserver.disconnect();
+      this.workflowListObserver = null;
+    }
+    
+    // Clean up navigation listeners
+    if (this.cleanupNavigationListeners) {
+      this.cleanupNavigationListeners();
+      this.cleanupNavigationListeners = null;
+    }
+    
+    // Clear workflow data
+    this.workflowData.clear();
+    
+    // Remove all injected UI elements - use more specific selectors
+    const allControls = document.querySelectorAll('.dc-run-controls, .dc-action-button, .dc-status-text, .dc-timeline, .dc-clear-button');
+    allControls.forEach(element => {
+      try {
+        element.remove();
+      } catch (e) {
+        console.warn('[GitHub Actions Extension] Error removing element:', e);
+      }
+    });
+    
+    // Also remove any namespace badges that might have been injected
+    const namespaceBadges = document.querySelectorAll('[data-dc-namespace]');
+    namespaceBadges.forEach(badge => {
+      try {
+        badge.remove();
+      } catch (e) {
+        console.warn('[GitHub Actions Extension] Error removing namespace badge:', e);
+      }
+    });
+    
+    // Remove injected styles if any
+    const styleElement = document.getElementById('daily-check-content-styles');
+    if (styleElement) {
+      try {
+        styleElement.remove();
+        this.stylesInjected = false; // Reset flag so styles can be re-injected if needed
+      } catch (e) {
+        console.warn('[GitHub Actions Extension] Error removing styles:', e);
+      }
+    }
+    
+    console.log('[GitHub Actions Extension] Cleanup completed');
   }
 
   async handleWorkflowRunPage() {
@@ -1004,6 +1147,8 @@ class GitHubActionsExtension {
         childList: true,
         subtree: true
       });
+      // Save observer reference for cleanup
+      this.workflowListObserver = observer;
     }
   }
 
@@ -2330,10 +2475,19 @@ class GitHubActionsExtension {
 }
 
 // Fallback implementation if modules fail to load
-function initFallback() {
+async function initFallback() {
+  // Check if extension is enabled before initializing fallback
+  const result = await chrome.storage.local.get(['extensionEnabled']);
+  const isEnabled = result.extensionEnabled !== false;
+  
+  if (!isEnabled) {
+    console.log('[GitHub Actions Extension] Extension is disabled, skipping fallback initialization');
+    return;
+  }
+  
   console.warn('Using fallback implementation');
   // Simple fallback that still tries to extract namespace
-  const extension = new GitHubActionsExtension(null, null, null);
-  extension.init();
+  extensionInstance = new GitHubActionsExtension(null, null, null);
+  await extensionInstance.init();
 }
 
