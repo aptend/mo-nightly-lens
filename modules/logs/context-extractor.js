@@ -1,6 +1,8 @@
 const CONTEXT_BEFORE = 10;
 const CONTEXT_AFTER = 10;
 const MERGE_EXTENSION = 10;
+const MAX_SNIPPET_LINES = 200;
+const MAX_ERROR_CONTEXTS = 2;
 const TIMESTAMP_PATTERN = /^\s*\d{4}-\d{2}-\d{2}[T\s]/;
 const ISO_TIMESTAMP_REGEX = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b/;
 const BASIC_TIMESTAMP_REGEX = /\b\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\b/;
@@ -145,9 +147,10 @@ export function extractErrorContexts(logText, {
     const line = lines[i];
     const hasGithubError = line.trimStart().startsWith('##[error]');
     const hasTimestamp = TIMESTAMP_PATTERN.test(line);
+    const hasErrorMessge = line.includes('ErrorMessage');
     const hasError = /(?:^|\s)ERROR\b/.test(line);
     const hasKilled = /\bKilled\b/i.test(line) || /exit code/i.test(line);
-    const hasSeverity = line.includes('FATAL') || hasError || hasKilled;
+    const hasSeverity = line.includes('FATAL') || hasError || hasKilled || hasErrorMessge;
     if (!(hasGithubError || (hasTimestamp && hasSeverity))) {
       continue;
     }
@@ -157,9 +160,15 @@ export function extractErrorContexts(logText, {
 
     if (ranges.length > 0) {
       const last = ranges[ranges.length - 1];
-      if (start <= last.mergeUntil) {
+      const currentRangeSize = last.endExclusive - last.start;
+      const wouldMergeSize = Math.max(last.endExclusive, endExclusive) - Math.min(last.start, start);
+      
+      if (start <= last.mergeUntil && currentRangeSize < MAX_SNIPPET_LINES && wouldMergeSize <= MAX_SNIPPET_LINES) {
         last.start = Math.min(last.start, start);
-        last.endExclusive = Math.max(last.endExclusive, endExclusive);
+        last.endExclusive = Math.min(
+          Math.max(last.endExclusive, endExclusive),
+          last.start + MAX_SNIPPET_LINES
+        );
         last.mergeUntil = Math.min(
           lines.length,
           Math.max(last.mergeUntil, endExclusive + MERGE_EXTENSION)
@@ -169,10 +178,15 @@ export function extractErrorContexts(logText, {
       }
     }
 
+    if (ranges.length >= MAX_ERROR_CONTEXTS) {
+      break;
+    }
+
+    const actualEndExclusive = Math.min(endExclusive, start + MAX_SNIPPET_LINES);
     ranges.push({
       start,
-      endExclusive,
-      mergeUntil: Math.min(lines.length, endExclusive + MERGE_EXTENSION),
+      endExclusive: actualEndExclusive,
+      mergeUntil: Math.min(lines.length, actualEndExclusive + MERGE_EXTENSION),
       firstMatchIndex: i
     });
   }
@@ -232,7 +246,10 @@ export function extractErrorContexts(logText, {
     if (finalErrorIndex !== -1) {
       const actualIndex = lines.length - 1 - finalErrorIndex;
       const start = Math.max(0, actualIndex - CONTEXT_BEFORE);
-      const endExclusive = Math.min(lines.length, actualIndex + CONTEXT_AFTER + 1);
+      const endExclusive = Math.min(
+        lines.length,
+        Math.min(actualIndex + CONTEXT_AFTER + 1, start + MAX_SNIPPET_LINES)
+      );
       const snippet = lines.slice(start, endExclusive).join('\n').trim();
       if (snippet.length > 0) {
         result.push({

@@ -15,7 +15,8 @@
   "content_scripts": [
     {
       "matches": [
-        "https://github.com/matrixorigin/mo-nightly-regression/actions/*"
+        "https://github.com/matrixorigin/mo-nightly-regression/actions/workflows/nightly-regression-tke-new.yaml*",
+        "https://github.com/matrixorigin/mo-nightly-regression/actions/workflows/branch-nightly-regression-tke-new.yaml*"
       ],
       "js": [
         "content.js"

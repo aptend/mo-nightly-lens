@@ -274,6 +274,9 @@ class GitHubActionsExtension {
     // Stop fallback progress polling
     this.stopProgressPolling();
     
+    // Stop UI presence check
+    this.stopUIPresenceCheck();
+    
     // Disconnect MutationObserver
     if (this.workflowListObserver) {
       this.workflowListObserver.disconnect();
@@ -477,6 +480,10 @@ class GitHubActionsExtension {
       '[data-testid="workflow-run-row"], .Box-row, .workflow-run-item'
     );
     for (const item of workflowItems) {
+      // 确保元素在 DOM 中
+      if (!document.contains(item)) {
+        continue;
+      }
       const runLink = item.querySelector('a[href*="/actions/runs/"]');
       if (!runLink) {
         continue;
@@ -487,6 +494,54 @@ class GitHubActionsExtension {
       }
     }
     return null;
+  }
+
+  /**
+   * 清理失效的元素引用
+   */
+  cleanupInvalidReferences() {
+    const storedRunIds = Array.from(this.workflowData.keys());
+    let cleanedCount = 0;
+    let recoveredCount = 0;
+
+    storedRunIds.forEach(runId => {
+      const storedItem = this.workflowData.get(runId);
+      
+      if (!storedItem || !document.contains(storedItem)) {
+        // 元素引用失效，尝试重新查找
+        const newItem = this.findWorkflowItemByRunId(runId);
+        if (newItem && document.contains(newItem)) {
+          console.log('[UI-DEBUG] ✓ Recovered reference for runId:', runId);
+          this.workflowData.set(runId, newItem);
+          recoveredCount++;
+          
+          // 检查是否需要重新渲染 UI
+          const searchRoot = newItem.matches('a') && newItem.parentElement ? newItem.parentElement : newItem;
+          const existingControls = searchRoot.querySelector(`.dc-run-controls[data-run-id="${runId}"]`);
+          if (!existingControls) {
+            // UI 控件缺失，需要重新渲染
+            this.loadStoredData().then(({ namespaces, reports }) => {
+              const report = reports[runId] || null;
+              console.log('[UI-DEBUG] Re-rendering UI for recovered runId:', runId);
+              this.renderRunActions(newItem, runId, report);
+            });
+          }
+        } else {
+          // 找不到新元素，可能是页面滚动导致元素不在视图中，暂时保留引用
+          // 或者元素真的被移除了，但这种情况应该很少
+          console.warn('[UI-DEBUG] ⚠️ Cannot recover reference for runId:', runId);
+          cleanedCount++;
+        }
+      }
+    });
+
+    if (recoveredCount > 0 || cleanedCount > 0) {
+      console.log('[UI-DEBUG] Cleanup completed', {
+        recoveredReferences: recoveredCount,
+        cleanedReferences: cleanedCount,
+        totalChecked: storedRunIds.length
+      });
+    }
   }
 
   extractRunId() {
@@ -1108,7 +1163,19 @@ class GitHubActionsExtension {
     // Find all workflow run items
     const workflowItems = document.querySelectorAll('[data-testid="workflow-run-row"], .Box-row, .workflow-run-item');
     
+    console.log('[UI-DEBUG] renderNamespacesOnWorkflows', {
+      itemCount: workflowItems.length,
+      storedRunIds: Array.from(this.workflowData.keys()),
+      timestamp: new Date().toISOString()
+    });
+    
     workflowItems.forEach(item => {
+      // 检查元素是否在 DOM 中
+      if (!document.contains(item)) {
+        console.warn('[UI-DEBUG] ⚠️ Item not in DOM, skipping', item);
+        return;
+      }
+      
       const runLink = item.querySelector('a[href*="/actions/runs/"]');
       if (!runLink) return;
       
@@ -1116,6 +1183,13 @@ class GitHubActionsExtension {
       if (!runIdMatch) return;
       
       const runId = runIdMatch[1];
+      
+      // 检查存储的元素引用是否失效
+      const storedItem = this.workflowData.get(runId);
+      if (storedItem && !document.contains(storedItem)) {
+        console.warn('[UI-DEBUG] ⚠️ Stored element invalid for runId:', runId);
+      }
+      
       this.workflowData.set(runId, item);
       const namespaceInfo = namespaceData[runId];
       const report = reportData[runId] || null;
@@ -1134,22 +1208,86 @@ class GitHubActionsExtension {
   }
 
   observeWorkflowList() {
-    const observer = new MutationObserver(() => {
-      this.loadStoredData().then(({ namespaces, reports }) => {
-        this.updateFailureReportsCache(reports);
-        this.renderNamespacesOnWorkflows(namespaces, reports);
+    console.log('[UI-DEBUG] Setting up workflow list observer...');
+    
+    // 防抖，避免频繁触发
+    let debounceTimer = null;
+    
+    const observer = new MutationObserver((mutations) => {
+      // 检查是否有 UI 元素被移除
+      const uiRemoved = mutations.some(m => {
+        return Array.from(m.removedNodes).some(node => {
+          if (node.nodeType !== Node.ELEMENT_NODE) return false;
+          return node.matches?.('.dc-run-controls') || node.querySelector?.('.dc-run-controls');
+        });
       });
+      
+      // 检查是否有 workflow items 被移除（可能是 GitHub 更新了 DOM）
+      const workflowItemsRemoved = mutations.some(m => {
+        return Array.from(m.removedNodes).some(node => {
+          if (node.nodeType !== Node.ELEMENT_NODE) return false;
+          return node.matches?.('.Box-row, [data-testid="workflow-run-row"]') ||
+                 node.querySelector?.('.Box-row, [data-testid="workflow-run-row"]');
+        });
+      });
+      
+      if (uiRemoved) {
+        console.warn('[UI-DEBUG] ⚠️ UI ELEMENTS REMOVED!', {
+          timestamp: new Date().toISOString(),
+          mutations: mutations.map(m => ({
+            type: m.type,
+            target: m.target?.tagName,
+            removedNodes: Array.from(m.removedNodes).map(n => ({
+              tagName: n.tagName,
+              className: n.className,
+              hasDCRunControls: n.matches?.('.dc-run-controls') || n.querySelector?.('.dc-run-controls')
+            }))
+          }))
+        });
+      }
+      
+      if (workflowItemsRemoved) {
+        console.warn('[UI-DEBUG] ⚠️ Workflow items removed (GitHub DOM update detected)!', {
+          timestamp: new Date().toISOString()
+        });
+        // 清理失效的元素引用
+        this.cleanupInvalidReferences();
+      }
+      
+      console.log('[UI-DEBUG] MutationObserver triggered', {
+        mutationCount: mutations.length,
+        uiRemoved,
+        workflowItemsRemoved,
+        timestamp: new Date().toISOString()
+      });
+      
+      // 防抖处理，避免频繁渲染
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+      }
+      debounceTimer = setTimeout(() => {
+        this.loadStoredData().then(({ namespaces, reports }) => {
+          this.updateFailureReportsCache(reports);
+          this.renderNamespacesOnWorkflows(namespaces, reports);
+        });
+      }, 300);
     });
 
     const workflowList = document.querySelector('.workflow-list, [data-testid="workflow-runs"]');
     if (workflowList) {
+      console.log('[UI-DEBUG] Workflow list container found, observing...');
       observer.observe(workflowList, {
         childList: true,
         subtree: true
       });
       // Save observer reference for cleanup
       this.workflowListObserver = observer;
+    } else {
+      console.warn('[UI-DEBUG] Workflow list container not found!');
     }
+    
+    // 启动定期 UI 检查
+    this.startUIPresenceCheck();
   }
 
   renderNamespaceFallback(element, namespace) {
@@ -1195,8 +1333,25 @@ class GitHubActionsExtension {
 
   renderRunActions(item, runId, reportFromStorage = null) {
     if (!item || !runId) {
+      console.warn('[UI-DEBUG] renderRunActions: invalid params', { item, runId });
       return;
     }
+
+    // 检查元素是否在 DOM 中
+    if (!document.contains(item)) {
+      console.warn('[UI-DEBUG] ⚠️ renderRunActions: item not in DOM', {
+        runId,
+        itemTagName: item.tagName,
+        itemClassName: item.className
+      });
+      return;
+    }
+
+    console.log('[UI-DEBUG] renderRunActions', {
+      runId,
+      itemInDOM: document.contains(item),
+      timestamp: new Date().toISOString()
+    });
 
     this.injectStyles();
 
@@ -1414,7 +1569,14 @@ class GitHubActionsExtension {
   getOrCreateRunControls(item, runId) {
     const searchRoot = item.matches('a') && item.parentElement ? item.parentElement : item;
     const existing = searchRoot.querySelector(`.dc-run-controls[data-run-id="${runId}"]`);
+    
     if (existing) {
+      // 检查现有元素是否在 DOM 中
+      if (!document.contains(existing)) {
+        console.warn('[UI-DEBUG] ⚠️ Existing controls not in DOM, will recreate', { runId });
+      } else {
+        console.log('[UI-DEBUG] Found existing controls', { runId });
+      }
       let clearButton = existing.querySelector('.dc-clear-button');
       // If clear button doesn't exist, create it for backward compatibility
       if (!clearButton) {
@@ -1473,6 +1635,13 @@ class GitHubActionsExtension {
     } else {
       item.appendChild(container);
     }
+
+    console.log('[UI-DEBUG] Created new controls', {
+      runId,
+      containerInDOM: document.contains(container),
+      itemInDOM: document.contains(item),
+      timestamp: new Date().toISOString()
+    });
 
     return {
       container,
@@ -2414,6 +2583,139 @@ class GitHubActionsExtension {
     if (this.progressPollInterval) {
       clearInterval(this.progressPollInterval);
       this.progressPollInterval = null;
+    }
+  }
+
+  /**
+   * 启动定期 UI 存在性检查
+   */
+  startUIPresenceCheck() {
+    if (this.uiPresenceCheckInterval) {
+      return;
+    }
+
+    console.log('[UI-DEBUG] Starting UI presence check (every 5s)...');
+    
+    this.uiPresenceCheckInterval = setInterval(() => {
+      this.checkUIPresence();
+    }, 5000); // 每 5 秒检查一次
+  }
+
+  /**
+   * 停止 UI 存在性检查
+   */
+  stopUIPresenceCheck() {
+    if (this.uiPresenceCheckInterval) {
+      clearInterval(this.uiPresenceCheckInterval);
+      this.uiPresenceCheckInterval = null;
+      console.log('[UI-DEBUG] Stopped UI presence check');
+    }
+  }
+
+  /**
+   * 检查 UI 元素是否存在
+   */
+  checkUIPresence() {
+    const storedRunIds = Array.from(this.workflowData.keys());
+    
+    if (storedRunIds.length === 0) {
+      return; // 没有存储的 runId，跳过检查
+    }
+
+    let missingCount = 0;
+    let invalidRefCount = 0;
+    let recoveredCount = 0;
+
+    storedRunIds.forEach(runId => {
+      const storedItem = this.workflowData.get(runId);
+      
+      // 检查存储的元素引用是否有效
+      if (!storedItem) {
+        invalidRefCount++;
+        console.warn('[UI-DEBUG] ⚠️ No stored item for runId:', runId);
+        // 尝试重新查找元素
+        const newItem = this.findWorkflowItemByRunId(runId);
+        if (newItem) {
+          console.log('[UI-DEBUG] ✓ Recovered item for runId:', runId);
+          this.workflowData.set(runId, newItem);
+          recoveredCount++;
+          // 继续检查 UI 控件
+        } else {
+          return; // 找不到元素，跳过
+        }
+      }
+
+      const itemToCheck = this.workflowData.get(runId);
+      if (!document.contains(itemToCheck)) {
+        invalidRefCount++;
+        console.warn('[UI-DEBUG] ⚠️ Stored item not in DOM for runId:', runId, {
+          storedItemTagName: itemToCheck.tagName,
+          storedItemClassName: itemToCheck.className
+        });
+        
+        // 尝试重新查找元素
+        const newItem = this.findWorkflowItemByRunId(runId);
+        if (newItem && document.contains(newItem)) {
+          console.log('[UI-DEBUG] ✓ Found new item in DOM for runId:', runId);
+          this.workflowData.set(runId, newItem);
+          recoveredCount++;
+          // 更新 itemToCheck 为新的元素
+          const updatedItem = newItem;
+          
+          // 检查 UI 控件是否存在
+          const searchRoot = updatedItem.matches('a') && updatedItem.parentElement ? updatedItem.parentElement : updatedItem;
+          const existingControls = searchRoot.querySelector(`.dc-run-controls[data-run-id="${runId}"]`);
+          
+          if (!existingControls) {
+            missingCount++;
+            console.warn('[UI-DEBUG] ⚠️ UI controls missing for runId (after recovery):', runId);
+            
+            // 尝试重新渲染
+            this.loadStoredData().then(({ namespaces, reports }) => {
+              const report = reports[runId] || null;
+              console.log('[UI-DEBUG] Attempting to re-render UI for runId:', runId);
+              this.renderRunActions(updatedItem, runId, report);
+            });
+          }
+        } else {
+          console.warn('[UI-DEBUG] ⚠️ Cannot find new item for runId:', runId);
+        }
+        return;
+      }
+
+      // 检查 UI 控件是否存在
+      const searchRoot = itemToCheck.matches('a') && itemToCheck.parentElement ? itemToCheck.parentElement : itemToCheck;
+      const existingControls = searchRoot.querySelector(`.dc-run-controls[data-run-id="${runId}"]`);
+      
+      if (!existingControls) {
+        missingCount++;
+        console.warn('[UI-DEBUG] ⚠️ UI controls missing for runId:', runId, {
+          storedItemInDOM: document.contains(itemToCheck),
+          searchRootInDOM: document.contains(searchRoot)
+        });
+        
+        // 尝试重新渲染
+        this.loadStoredData().then(({ namespaces, reports }) => {
+          const report = reports[runId] || null;
+          console.log('[UI-DEBUG] Attempting to re-render UI for runId:', runId);
+          this.renderRunActions(itemToCheck, runId, report);
+        });
+      }
+    });
+
+    if (missingCount > 0 || invalidRefCount > 0) {
+      console.warn('[UI-DEBUG] ⚠️ UI presence check found issues', {
+        missingControls: missingCount,
+        invalidReferences: invalidRefCount,
+        recoveredItems: recoveredCount,
+        totalChecked: storedRunIds.length,
+        timestamp: new Date().toISOString()
+      });
+    } else {
+      console.debug('[UI-DEBUG] ✓ UI presence check passed', {
+        checkedRunIds: storedRunIds.length,
+        timestamp: new Date().toISOString()
+      });
     }
   }
 
